@@ -1,0 +1,18 @@
+nohup: 忽略输入
+INFO:     Started server process [3663]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+使用模拟模型
+资产台账分析完成: 5000项资产, 50条事件
+INFO:     127.0.0.1:38072 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52378 - "POST /auth/login HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52394 - "POST /sensors/sim/start HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52408 - "POST /bigdata/spark/start HTTP/1.1" 200 OK
+WARNING:  Invalid HTTP request received.
+INFO:     127.0.0.1:39634 - "GET /predict/risk/WSP-00001 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51958 - "POST /auth/login HTTP/1.1" 200 OK
+WARNING:  Invalid HTTP request received.
+INFO:     127.0.0.1:58362 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58370 - "POST /auth/login HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58378 - "GET /kb/search?q=%E7%90%83%E9%93%B8%E9%93%81%E7%AE%A1 HTTP/1.1" 200 OK

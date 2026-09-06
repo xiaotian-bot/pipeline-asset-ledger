@@ -1,0 +1,48 @@
+INFO:     Started server process [8365]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+使用模拟模型
+资产台账分析完成: 5000项资产, 50条事件
+INFO:     127.0.0.1:47302 - "GET /asset/detail/WSP-00001 HTTP/1.1" 401 Unauthorized
+INFO:     192.168.220.1:50470 - "GET /asset/detail/WSP-00001 HTTP/1.1" 401 Unauthorized
+INFO:     192.168.220.1:50471 - "POST /auth/login HTTP/1.1" 200 OK
+INFO:     192.168.220.1:50473 - "GET /asset/detail/WSP-00001 HTTP/1.1" 200 OK
+INFO:     192.168.220.1:50474 - "GET /asset/detail/GSP-99999 HTTP/1.1" 200 OK
+INFO:     192.168.220.1:50475 - "GET /inventory/checks?page_size=3 HTTP/1.1" 200 OK
+INFO:     192.168.220.1:50476 - "GET /ownership/changes?page_size=2 HTTP/1.1" 200 OK
+INFO:     192.168.220.1:50477 - "PUT /inventory/checks/CHK-SEED-001/resolve HTTP/1.1" 400 Bad Request
+INFO:     192.168.220.1:50478 - "PUT /inventory/checks/CHK-SEED-001/resolve HTTP/1.1" 400 Bad Request
+INFO:     192.168.220.1:50479 - "GET /asset/list?pipeline_type=%E7%87%83%E6%B0%94%E7%AE%A1%E7%BD%91&status=%E5%9C%A8%E7%94%A8&page_size=2 HTTP/1.1" 200 OK
+INFO:     192.168.220.1:50500 - "GET /inventory/checks?page_size=8 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:41420 - "PUT /inventory/checks/CHK-SEED-001/resolve HTTP/1.1" 200 OK
+INFO:     127.0.0.1:41426 - "PUT /inventory/checks/CHK-SEED-001/resolve HTTP/1.1" 400 Bad Request
+INFO:     192.168.220.1:49573 - "GET / HTTP/1.1" 307 Temporary Redirect
+INFO:     192.168.220.1:49574 - "GET /index.html HTTP/1.1" 404 Not Found
+INFO:     192.168.220.1:49575 - "GET /output/index.html HTTP/1.1" 200 OK
+INFO:     192.168.220.1:49576 - "GET /show.html HTTP/1.1" 404 Not Found
+INFO:     192.168.220.1:65360 - "GET /output/login.html HTTP/1.1" 200 OK
+INFO:     192.168.220.1:62686 - "POST /auth/login HTTP/1.1" 200 OK
+INFO:     192.168.220.1:54260 - "POST /auth/login HTTP/1.1" 200 OK
+INFO:     192.168.220.1:58735 - "GET /output/index.html HTTP/1.1" 200 OK
+INFO:     192.168.220.1:58735 - "GET /asset/overview?_=1 HTTP/1.1" 200 OK
+INFO:     192.168.220.1:58735 - "GET /favicon.ico HTTP/1.1" 404 Not Found
+INFO:     192.168.220.1:58735 - "GET /asset/distribution?_=1 HTTP/1.1" 200 OK
+INFO:     192.168.220.1:58735 - "GET /lifecycle/cost-summary?_=1 HTTP/1.1" 200 OK
+INFO:     192.168.220.1:58735 - "GET /lifecycle/events?_=1 HTTP/1.1" 200 OK
+INFO:     192.168.220.1:58735 - "GET /inventory/diff-report?_=1 HTTP/1.1" 200 OK
+INFO:     192.168.220.1:58735 - "GET /inventory/summary?_=1 HTTP/1.1" 200 OK
+INFO:     192.168.220.1:58735 - "GET /risk/ranking?_=1 HTTP/1.1" 200 OK
+INFO:     192.168.220.1:58735 - "GET /ownership/summary?_=1 HTTP/1.1" 200 OK
+INFO:     192.168.220.1:58735 - "GET /map/data?_=1 HTTP/1.1" 200 OK
+INFO:     192.168.220.1:58735 - "GET /alerts?_=1 HTTP/1.1" 200 OK
+INFO:     192.168.220.1:54197 - "GET /asset/detail/WSP-00001?_=1 HTTP/1.1" 200 OK
+INFO:     192.168.220.1:63440 - "GET /asset/detail/HTP-00503?_=1 HTTP/1.1" 200 OK
+INFO:     192.168.220.1:63440 - "PUT /inventory/checks/CHK-SEED-002/resolve HTTP/1.1" 200 OK
+INFO:     192.168.220.1:63440 - "GET /asset/detail/HTP-00503?_=1 HTTP/1.1" 200 OK
+INFO:     192.168.220.1:50412 - "GET /output/show.html HTTP/1.1" 200 OK
+INFO:     192.168.220.1:50412 - "GET /output/echarts.min.js HTTP/1.1" 304 Not Modified
+INFO:     192.168.220.1:61502 - "GET /output/login.html HTTP/1.1" 200 OK
+INFO:     192.168.220.1:61505 - "POST /auth/login HTTP/1.1" 200 OK
+INFO:     192.168.220.1:61505 - "GET /output/show.html HTTP/1.1" 200 OK
+INFO:     192.168.220.1:61514 - "GET /output/echarts.min.js HTTP/1.1" 304 Not Modified

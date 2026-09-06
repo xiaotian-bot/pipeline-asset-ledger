@@ -1,0 +1,21 @@
+{
+  "kafka": {
+    "bootstrap_servers": "localhost:9092",
+    "sensor_topic": "sensor-data",
+    "enabled": true
+  },
+  "spark": {
+    "master": "spark://localhost:7077",
+    "app_name": "SensorStreaming",
+    "window_duration": 60,
+    "slide_duration": 10,
+    "starting_offsets": "latest"
+  },
+  "hive": {
+    "host": "localhost",
+    "port": 10000,
+    "username": "hive",
+    "metastore_uris": "thrift://localhost:9083",
+    "warehouse_dir": "/user/hive/warehouse"
+  }
+}

@@ -1,0 +1,657 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
+    <title>城市管网资产数字化台账 - 登录</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🏙</text></svg>">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Microsoft YaHei', sans-serif;
+            background: #060d1a;
+            color: #e0e8f0;
+            height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            overflow: hidden;
+            position: relative;
+        }
+
+        .bg-grid {
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background-image:
+                linear-gradient(rgba(0,180,255,0.04) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(0,180,255,0.04) 1px, transparent 1px);
+            background-size: 50px 50px;
+            pointer-events: none;
+            z-index: 0;
+        }
+        .bg-grid::after {
+            content: '';
+            position: absolute;
+            inset: 0;
+            background: radial-gradient(ellipse at 50% 50%, transparent 30%, rgba(6,13,26,0.8) 100%);
+        }
+
+        .bg-glow {
+            position: fixed;
+            width: 600px; height: 600px;
+            border-radius: 50%;
+            filter: blur(140px);
+            pointer-events: none;
+            z-index: 0;
+        }
+        .bg-glow-1 {
+            background: rgba(0,120,255,0.18);
+            top: -200px; left: -100px;
+            animation: glowDrift1 20s ease-in-out infinite;
+        }
+        .bg-glow-2 {
+            background: rgba(0,255,160,0.12);
+            bottom: -200px; right: -100px;
+            animation: glowDrift2 25s ease-in-out infinite;
+        }
+        .bg-glow-3 {
+            background: rgba(100,0,255,0.08);
+            top: 50%; left: 50%;
+            transform: translate(-50%, -50%);
+            animation: glowPulse 8s ease-in-out infinite;
+        }
+        @keyframes glowDrift1 {
+            0%, 100% { transform: translate(0, 0); }
+            50% { transform: translate(80px, 60px); }
+        }
+        @keyframes glowDrift2 {
+            0%, 100% { transform: translate(0, 0); }
+            50% { transform: translate(-60px, -80px); }
+        }
+        @keyframes glowPulse {
+            0%, 100% { opacity: 0.3; transform: translate(-50%, -50%) scale(1); }
+            50% { opacity: 0.6; transform: translate(-50%, -50%) scale(1.2); }
+        }
+
+        .particles {
+            position: fixed;
+            top: 0; left: 0;
+            width: 100%; height: 100%;
+            pointer-events: none;
+            overflow: hidden;
+            z-index: 1;
+        }
+        .particle {
+            position: absolute;
+            background: rgba(0,180,255,0.5);
+            border-radius: 50%;
+            animation: floatUp linear infinite;
+        }
+        @keyframes floatUp {
+            0% { transform: translateY(100vh) scale(0); opacity: 0; }
+            10% { opacity: 1; }
+            90% { opacity: 1; }
+            100% { transform: translateY(-10vh) scale(1); opacity: 0; }
+        }
+
+        .login-wrapper {
+            position: relative;
+            z-index: 10;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 0;
+        }
+
+        .login-container {
+            width: 460px;
+            background: rgba(8,20,40,0.75);
+            border: 1px solid rgba(0,180,255,0.2);
+            border-radius: 16px;
+            padding: 36px 36px 30px;
+            backdrop-filter: blur(20px);
+            box-shadow:
+                0 0 60px rgba(0,120,255,0.08),
+                0 0 1px rgba(0,180,255,0.4),
+                inset 0 1px 0 rgba(255,255,255,0.05);
+            position: relative;
+            overflow: hidden;
+            animation: containerGlow 4s ease-in-out infinite;
+        }
+        @keyframes containerGlow {
+            0%, 100% { box-shadow: 0 0 60px rgba(0,120,255,0.08), 0 0 1px rgba(0,180,255,0.4), inset 0 1px 0 rgba(255,255,255,0.05); }
+            50% { box-shadow: 0 0 80px rgba(0,120,255,0.15), 0 0 2px rgba(0,180,255,0.6), inset 0 1px 0 rgba(255,255,255,0.08); }
+        }
+        .login-container::before {
+            content: '';
+            position: absolute;
+            top: -1px; left: -1px; right: -1px; bottom: -1px;
+            border-radius: 16px;
+            background: linear-gradient(135deg, rgba(0,180,255,0.3), transparent 40%, transparent 60%, rgba(0,255,160,0.2));
+            z-index: -1;
+            opacity: 0;
+            transition: opacity 0.5s;
+        }
+        .login-container:hover::before { opacity: 1; }
+
+        .login-container.shake {
+            animation: shakeAnim 0.5s ease-in-out;
+        }
+        @keyframes shakeAnim {
+            0%, 100% { transform: translateX(0); }
+            10%, 50%, 90% { transform: translateX(-6px); }
+            30%, 70% { transform: translateX(6px); }
+        }
+
+        .login-header {
+            text-align: center;
+            margin-bottom: 28px;
+        }
+        .login-header .icon {
+            width: 60px; height: 60px;
+            margin: 0 auto 14px;
+            background: linear-gradient(135deg, rgba(0,140,255,0.15), rgba(0,255,160,0.15));
+            border: 1px solid rgba(0,180,255,0.25);
+            border-radius: 14px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 28px;
+            position: relative;
+        }
+        .login-header .icon::after {
+            content: '';
+            position: absolute;
+            inset: -3px;
+            border-radius: 16px;
+            background: conic-gradient(from 0deg, transparent, rgba(0,180,255,0.3), transparent, rgba(0,255,160,0.2), transparent);
+            animation: iconSpin 6s linear infinite;
+            z-index: -1;
+        }
+        @keyframes iconSpin {
+            to { transform: rotate(360deg); }
+        }
+        .login-header h1 {
+            font-size: 22px;
+            font-weight: bold;
+            background: linear-gradient(90deg, #00b4ff, #00ff88);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            letter-spacing: 2px;
+            margin-bottom: 4px;
+        }
+        .login-header p {
+            font-size: 12px;
+            color: #4a7a9a;
+            letter-spacing: 1px;
+        }
+
+        .role-cards {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 24px;
+        }
+        .role-card {
+            flex: 1;
+            padding: 12px 8px;
+            background: rgba(0,20,50,0.5);
+            border: 1px solid rgba(0,180,255,0.12);
+            border-radius: 10px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.3s;
+            position: relative;
+            overflow: hidden;
+        }
+        .role-card::before {
+            content: '';
+            position: absolute;
+            inset: 0;
+            background: linear-gradient(135deg, rgba(0,180,255,0.08), rgba(0,255,160,0.05));
+            opacity: 0;
+            transition: opacity 0.3s;
+        }
+        .role-card:hover { border-color: rgba(0,180,255,0.35); transform: translateY(-2px); }
+        .role-card:hover::before { opacity: 1; }
+        .role-card.active {
+            border-color: rgba(0,180,255,0.6);
+            background: rgba(0,40,80,0.6);
+            box-shadow: 0 0 20px rgba(0,180,255,0.15), inset 0 0 20px rgba(0,180,255,0.05);
+        }
+        .role-card.active::before { opacity: 1; }
+        .role-card .role-icon {
+            font-size: 22px;
+            margin-bottom: 6px;
+            display: block;
+        }
+        .role-card .role-name {
+            font-size: 12px;
+            color: #8ab8d8;
+            font-weight: 500;
+        }
+        .role-card.active .role-name { color: #00d4ff; }
+        .role-card .role-desc {
+            font-size: 10px;
+            color: #4a6a8a;
+            margin-top: 3px;
+        }
+
+        .form-group {
+            margin-bottom: 18px;
+        }
+        .form-group label {
+            display: block;
+            font-size: 12px;
+            color: #6a9aba;
+            margin-bottom: 6px;
+            padding-left: 2px;
+            letter-spacing: 0.5px;
+        }
+        .input-wrapper {
+            position: relative;
+        }
+        .input-wrapper .input-icon {
+            position: absolute;
+            left: 12px;
+            top: 50%;
+            transform: translateY(-50%);
+            font-size: 14px;
+            color: #3a6a8a;
+            pointer-events: none;
+            transition: color 0.2s;
+        }
+        .form-group input {
+            width: 100%;
+            height: 44px;
+            background: rgba(0,15,35,0.7);
+            border: 1px solid rgba(0,180,255,0.15);
+            border-radius: 8px;
+            padding: 0 14px 0 38px;
+            font-size: 14px;
+            color: #e0e8f0;
+            outline: none;
+            transition: border-color 0.3s, box-shadow 0.3s;
+        }
+        .form-group input::placeholder { color: #2a4a6a; }
+        .form-group input:focus {
+            border-color: rgba(0,180,255,0.5);
+            box-shadow: 0 0 16px rgba(0,180,255,0.1), 0 0 0 3px rgba(0,180,255,0.05);
+        }
+        .form-group input:focus + .input-icon,
+        .input-wrapper:focus-within .input-icon { color: #00b4ff; }
+        #password { padding-right: 40px; }
+        .pwd-eye {
+            position: absolute;
+            right: 12px;
+            top: 50%;
+            transform: translateY(-50%);
+            font-size: 15px;
+            color: #3a6a8a;
+            cursor: pointer;
+            user-select: none;
+            transition: color 0.2s;
+        }
+        .pwd-eye:hover { color: #00b4ff; }
+
+        .login-btn {
+            width: 100%;
+            height: 48px;
+            background: linear-gradient(135deg, #0055cc, #0088ff, #00bbff);
+            background-size: 200% 200%;
+            border: none;
+            border-radius: 8px;
+            color: white;
+            font-size: 15px;
+            font-weight: bold;
+            letter-spacing: 3px;
+            cursor: pointer;
+            transition: all 0.3s;
+            position: relative;
+            overflow: hidden;
+        }
+        .login-btn::before {
+            content: '';
+            position: absolute;
+            top: 0; left: -100%;
+            width: 100%; height: 100%;
+            background: linear-gradient(90deg, transparent, rgba(255,255,255,0.15), transparent);
+            transition: left 0.5s;
+        }
+        .login-btn:hover {
+            background-position: 100% 0;
+            box-shadow: 0 4px 24px rgba(0,120,255,0.4);
+            transform: translateY(-1px);
+        }
+        .login-btn:hover::before { left: 100%; }
+        .login-btn:active { transform: translateY(0) scale(0.98); }
+        .login-btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none !important;
+            box-shadow: none !important;
+        }
+
+        .error-msg {
+            color: #ef4444;
+            font-size: 12px;
+            text-align: center;
+            margin-top: 12px;
+            min-height: 18px;
+            transition: color 0.3s;
+        }
+        .error-msg.success { color: #10b981; }
+
+        .footer-links {
+            margin-top: 20px;
+            text-align: center;
+            font-size: 12px;
+        }
+        .footer-links a {
+            color: #4a7a9a;
+            text-decoration: none;
+            transition: color 0.2s;
+            padding: 4px 8px;
+            border-radius: 4px;
+        }
+        .footer-links a:hover { color: #00b4ff; background: rgba(0,180,255,0.05); }
+        .footer-links .sep { color: #1a3a5a; margin: 0 8px; }
+
+        .login-footer {
+            margin-top: 24px;
+            text-align: center;
+            font-size: 11px;
+            color: #2a4a6a;
+        }
+        .login-footer .shortcut-hint {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+        }
+        .login-footer kbd {
+            display: inline-block;
+            padding: 1px 6px;
+            background: rgba(0,40,80,0.5);
+            border: 1px solid rgba(0,180,255,0.15);
+            border-radius: 3px;
+            font-size: 10px;
+            color: #5a8aaa;
+            font-family: monospace;
+        }
+
+        /* ===== 最近登录账号 ===== */
+        .recent-accounts {
+            margin-top: 16px;
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 8px;
+        }
+        .ra-label { font-size: 11px; color: #4a7a9a; letter-spacing: 1px; }
+        .ra-chip {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 4px 10px;
+            background: rgba(0,40,80,0.5);
+            border: 1px solid rgba(0,180,255,0.2);
+            border-radius: 14px;
+            font-size: 12px;
+            color: #8ab8d8;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        .ra-chip:hover { border-color: rgba(0,180,255,0.5); color: #00d4ff; background: rgba(0,60,110,0.5); }
+        .ra-del { font-style: normal; font-size: 10px; color: #4a6a8a; padding: 0 2px; }
+        .ra-del:hover { color: #ef4444; }
+    </style>
+</head>
+<body>
+    <div class="bg-grid"></div>
+    <div class="bg-glow bg-glow-1"></div>
+    <div class="bg-glow bg-glow-2"></div>
+    <div class="bg-glow bg-glow-3"></div>
+    <div class="particles" id="particles"></div>
+
+    <div class="login-wrapper">
+        <div class="login-container" id="loginContainer">
+            <div class="login-header">
+                <div class="icon">🏙</div>
+                <h1>城市管网资产数字化台账</h1>
+                <p>Urban Pipeline Asset Digital Ledger</p>
+            </div>
+
+            <div class="role-cards" id="roleCards">
+                <div class="role-card active" data-role="admin" onclick="selectRole(this)">
+                    <span class="role-icon">👨‍💼</span>
+                    <div class="role-name">系统管理员</div>
+                    <div class="role-desc">全部权限</div>
+                </div>
+                <div class="role-card" data-role="oam" onclick="selectRole(this)">
+                    <span class="role-icon">🔧</span>
+                    <div class="role-name">运维人员</div>
+                    <div class="role-desc">运维管理</div>
+                </div>
+                <div class="role-card" data-role="viewer" onclick="selectRole(this)">
+                    <span class="role-icon">👁</span>
+                    <div class="role-name">监管查看员</div>
+                    <div class="role-desc">只读查看</div>
+                </div>
+            </div>
+
+            <div class="form-group">
+                <label>用户名</label>
+                <div class="input-wrapper">
+                    <input type="text" id="username" placeholder="请输入用户名" autocomplete="off">
+                    <span class="input-icon">👤</span>
+                </div>
+            </div>
+            <div class="form-group">
+                <label>密码</label>
+                <div class="input-wrapper">
+                    <input type="password" id="password" placeholder="请输入密码">
+                    <span class="input-icon">🔒</span>
+                    <span class="pwd-eye" id="pwdEye" onclick="togglePwdEye()" title="显示/隐藏密码">👁</span>
+                </div>
+            </div>
+
+            <button class="login-btn" id="loginBtn" onclick="doLogin()">登 录</button>
+            <div class="error-msg" id="errorMsg"></div>
+
+            <div class="recent-accounts" id="recentAccounts" style="display:none;"></div>
+
+            <div class="footer-links">
+                <a href="register.html">注册新账号</a>
+                <span class="sep">|</span>
+                <a href="javascript:void(0)" onclick="fillGuest()">演示账号</a>
+            </div>
+        </div>
+
+        <div class="login-footer">
+            <span class="shortcut-hint">按 <kbd>Enter</kbd> 快速登录 · 按 <kbd>Tab</kbd> 切换字段</span>
+        </div>
+    </div>
+
+    <script>
+    var API_BASE = location.protocol + '//' + location.hostname + ':8000';
+    var selectedRole = 'admin';
+
+    var ROLE_CREDENTIALS = {
+        admin: { username: 'admin', password: 'admin123' },
+        oam: { username: 'oam_user', password: 'oam123' },
+        viewer: { username: 'viewer_user', password: 'view123' }
+    };
+
+    // ==================== 记住账号（与大屏共用，最多 5 个）====================
+    function getRememberedAccounts() {
+        try {
+            var l = JSON.parse(localStorage.getItem('pipeline_accounts') || '[]');
+            return Array.isArray(l) ? l : [];
+        } catch (e) { return []; }
+    }
+    function rememberAccount(acct) {
+        if (!acct || !acct.username) return;
+        var list = getRememberedAccounts().filter(function(a) { return a.username !== acct.username; });
+        list.unshift({
+            username: acct.username,
+            password: acct.password || '',
+            name: acct.name || acct.username,
+            role_name: acct.role_name || '',
+            last: new Date().toLocaleString('zh-CN', { hour12: false })
+        });
+        localStorage.setItem('pipeline_accounts', JSON.stringify(list.slice(0, 5)));
+    }
+    function removeRememberedAccount(username, ev) {
+        if (ev) ev.stopPropagation();
+        var list = getRememberedAccounts().filter(function(a) { return a.username !== username; });
+        localStorage.setItem('pipeline_accounts', JSON.stringify(list));
+        renderRecentAccounts();
+    }
+    function escAttr(s) {
+        var d = document.createElement('div');
+        d.textContent = s == null ? '' : String(s);
+        return d.innerHTML.replace(/'/g, '&#39;').replace(/"/g, '&quot;');
+    }
+    function fillAccount(username) {
+        var list = getRememberedAccounts();
+        var acct = null;
+        for (var i = 0; i < list.length; i++) { if (list[i].username === username) { acct = list[i]; break; } }
+        if (!acct) return;
+        document.getElementById('username').value = acct.username;
+        document.getElementById('password').value = acct.password || '';
+        var errEl = document.getElementById('errorMsg');
+        errEl.textContent = '';
+        errEl.className = 'error-msg';
+    }
+    function renderRecentAccounts() {
+        var box = document.getElementById('recentAccounts');
+        if (!box) return;
+        var list = getRememberedAccounts();
+        if (!list.length) { box.style.display = 'none'; box.innerHTML = ''; return; }
+        box.style.display = '';
+        box.innerHTML = '<span class="ra-label">最近登录</span>' + list.map(function(a) {
+            return '<span class="ra-chip" onclick="fillAccount(\'' + escAttr(a.username) + '\')" title="点击填充账号密码">' +
+                escAttr(a.name || a.username) +
+                '<i class="ra-del" onclick="removeRememberedAccount(\'' + escAttr(a.username) + '\', event)" title="移除">✕</i>' +
+            '</span>';
+        }).join('');
+    }
+    renderRecentAccounts();
+
+    function selectRole(card) {
+        document.querySelectorAll('.role-card').forEach(function(c) { c.classList.remove('active'); });
+        card.classList.add('active');
+        selectedRole = card.getAttribute('data-role');
+    }
+
+    function fillGuest() {
+        var creds = ROLE_CREDENTIALS[selectedRole] || ROLE_CREDENTIALS.admin;
+        document.getElementById('username').value = creds.username;
+        document.getElementById('password').value = creds.password;
+        document.getElementById('errorMsg').textContent = '';
+        document.getElementById('errorMsg').className = 'error-msg';
+    }
+
+    function shakeContainer() {
+        var el = document.getElementById('loginContainer');
+        el.classList.remove('shake');
+        void el.offsetWidth;
+        el.classList.add('shake');
+        setTimeout(function() { el.classList.remove('shake'); }, 600);
+    }
+
+    function doLogin() {
+        var user = document.getElementById('username').value.trim();
+        var pass = document.getElementById('password').value.trim();
+        var errEl = document.getElementById('errorMsg');
+        var btn = document.getElementById('loginBtn');
+
+        if (!user || !pass) {
+            errEl.className = 'error-msg';
+            errEl.textContent = '请输入用户名和密码';
+            shakeContainer();
+            return;
+        }
+
+        btn.disabled = true;
+        btn.textContent = '登录中...';
+        errEl.textContent = '';
+        errEl.className = 'error-msg';
+
+        fetch(API_BASE + '/auth/login', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ username: user, password: pass })
+        })
+        .then(function(res) { return res.json().then(function(data) { return { ok: res.ok, data: data }; }); })
+        .then(function(result) {
+            if (!result.ok) {
+                errEl.className = 'error-msg';
+                errEl.textContent = result.data.detail || '登录失败';
+                btn.disabled = false;
+                btn.textContent = '登 录';
+                shakeContainer();
+                return;
+            }
+            var info = result.data;
+            localStorage.setItem('pipeline_token', info.token);
+            localStorage.setItem('pipeline_user', JSON.stringify({
+                username: info.username,
+                name: info.name,
+                role: info.role,
+                role_name: info.role_name
+            }));
+            rememberAccount({ username: info.username, password: pass, name: info.name, role_name: info.role_name });
+
+            errEl.className = 'error-msg success';
+            errEl.textContent = '登录成功，正在跳转...';
+
+            setTimeout(function() {
+                window.location.href = 'show.html';
+            }, 500);
+        })
+        .catch(function(e) {
+            errEl.className = 'error-msg';
+            errEl.textContent = '网络错误，请检查服务是否启动';
+            btn.disabled = false;
+            btn.textContent = '登 录';
+            shakeContainer();
+        });
+    }
+
+    document.getElementById('password').addEventListener('keydown', function(e) {
+        if (e.key === 'Enter') doLogin();
+    });
+
+    function togglePwdEye() {
+        var pwd = document.getElementById('password');
+        var eye = document.getElementById('pwdEye');
+        var visible = pwd.type === 'text';
+        pwd.type = visible ? 'password' : 'text';
+        eye.textContent = visible ? '👁' : '🙈';
+        eye.title = visible ? '显示密码' : '隐藏密码';
+    }
+    document.getElementById('username').addEventListener('keydown', function(e) {
+        if (e.key === 'Enter') document.getElementById('password').focus();
+    });
+
+    (function createParticles() {
+        var container = document.getElementById('particles');
+        for (var i = 0; i < 40; i++) {
+            var p = document.createElement('div');
+            p.className = 'particle';
+            p.style.left = Math.random() * 100 + '%';
+            p.style.animationDuration = (8 + Math.random() * 12) + 's';
+            p.style.animationDelay = (Math.random() * 10) + 's';
+            var size = (1 + Math.random() * 2) + 'px';
+            p.style.width = size;
+            p.style.height = size;
+            p.style.background = Math.random() > 0.5 ? 'rgba(0,180,255,0.4)' : 'rgba(0,255,160,0.3)';
+            container.appendChild(p);
+        }
+    })();
+    </script>
+</body>
+</html>

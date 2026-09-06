@@ -1,0 +1,1158 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>电商大数据可视化大屏</title>
+    <script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>
+    <style>
+        body { margin: 0; background: #0a0e1a; color: white; font-family: 'Microsoft YaHei', Arial; }
+        .grid-container {
+            display: grid;
+            grid-template-columns: repeat(12, 1fr);
+            grid-template-rows: repeat(6, 1fr);
+            gap: 10px;
+            padding: 10px;
+            height: 100vh;
+            box-sizing: border-box;
+        }
+        .grid-item {
+            background: rgba(30, 41, 59, 0.85);
+            border-radius: 8px;
+            padding: 15px;
+            border: 1px solid rgba(59, 130, 246, 0.3);
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+        }
+        .title { 
+            grid-column: 1/13; 
+            grid-row: 1/2; 
+            text-align: center; 
+            font-size: 28px; 
+            padding-top: 15px; 
+            background: linear-gradient(90deg, rgba(30,41,59,0.95) 0%, rgba(59,130,246,0.4) 50%, rgba(30,41,59,0.95) 100%); 
+            position: relative; 
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .title h1 {
+            margin: 0;
+            background: linear-gradient(90deg, #3b82f6, #60a5fa, #3b82f6);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+        .traffic { grid-column: 1/5; grid-row: 2/4; }
+        .sales { grid-column: 5/9; grid-row: 2/4; }
+        .conversion { grid-column: 9/13; grid-row: 2/4; }
+        .behavior { grid-column: 1/5; grid-row: 4/6; }
+        .probability { grid-column: 5/9; grid-row: 4/6; }
+        .realtime { grid-column: 9/13; grid-row: 4/6; }
+        .summary { grid-column: 1/13; grid-row: 6/7; }
+        
+        .stat-card { 
+            display: inline-block; 
+            width: 22%; 
+            text-align: center; 
+            padding: 15px; 
+            background: linear-gradient(135deg, rgba(59, 130, 246, 0.2) 0%, rgba(37, 99, 235, 0.1) 100%); 
+            border-radius: 8px;
+            margin: 0.5%;
+            border: 1px solid rgba(59, 130, 246, 0.3);
+            transition: all 0.3s ease;
+        }
+        .stat-card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 20px rgba(59, 130, 246, 0.3);
+        }
+        .stat-value { font-size: 28px; font-weight: bold; color: #3b82f6; }
+        .stat-label { font-size: 14px; color: #94a3b8; margin-top: 5px; }
+        
+        /* 刷新按钮样式 */
+        .refresh-btn {
+            position: absolute;
+            right: 30px;
+            top: 50%;
+            transform: translateY(-50%);
+            padding: 12px 32px;
+            background: linear-gradient(135deg, #3b82f6 0%, #1d4ed8 100%);
+            border: none;
+            border-radius: 10px;
+            color: white;
+            font-size: 15px;
+            font-weight: bold;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            box-shadow: 0 4px 15px rgba(59, 130, 246, 0.4);
+        }
+        .refresh-btn:hover:not(:disabled) {
+            background: linear-gradient(135deg, #2563eb 0%, #1e40af 100%);
+            transform: translateY(-50%) translateY(-2px);
+            box-shadow: 0 8px 25px rgba(59, 130, 246, 0.5);
+        }
+        .refresh-btn:active:not(:disabled) {
+            transform: translateY(-50%);
+        }
+        .refresh-btn:disabled {
+            background: linear-gradient(135deg, #64748b 0%, #475569 100%);
+            cursor: not-allowed;
+            box-shadow: none;
+        }
+        .refresh-icon {
+            font-size: 18px;
+        }
+        .refresh-icon.spin {
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin {
+            from { transform: rotate(0deg); }
+            to { transform: rotate(360deg); }
+        }
+        
+        /* 加载遮罩 */
+        .loading-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(10, 14, 26, 0.95);
+            display: none;
+            justify-content: center;
+            align-items: center;
+            z-index: 1000;
+            backdrop-filter: blur(5px);
+        }
+        .loading-overlay.show {
+            display: flex;
+        }
+        .loading-content {
+            text-align: center;
+            padding: 50px;
+            background: linear-gradient(135deg, rgba(30, 41, 59, 0.98) 0%, rgba(15, 23, 42, 0.98) 100%);
+            border-radius: 16px;
+            border: 1px solid rgba(59, 130, 246, 0.4);
+            min-width: 450px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+        }
+        .loading-spinner {
+            width: 60px;
+            height: 60px;
+            border: 4px solid rgba(59, 130, 246, 0.2);
+            border-top-color: #3b82f6;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 25px;
+        }
+        .loading-text {
+            color: #94a3b8;
+            font-size: 17px;
+            margin-bottom: 20px;
+            font-weight: 500;
+        }
+        .loading-progress {
+            width: 350px;
+            height: 10px;
+            background: rgba(59, 130, 246, 0.2);
+            border-radius: 5px;
+            margin: 0 auto 20px;
+            overflow: hidden;
+        }
+        .loading-progress-bar {
+            height: 100%;
+            background: linear-gradient(90deg, #3b82f6, #60a5fa, #93c5fd);
+            border-radius: 5px;
+            transition: width 0.5s ease;
+            box-shadow: 0 0 10px rgba(59, 130, 246, 0.5);
+        }
+        .workflow-status {
+            margin-top: 15px;
+            font-size: 15px;
+            color: #10b981;
+            font-weight: 500;
+        }
+        .workflow-step {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 12px;
+            margin-bottom: 10px;
+        }
+        .step-dot {
+            width: 14px;
+            height: 14px;
+            border-radius: 50%;
+            background: #475569;
+            transition: all 0.3s ease;
+            box-shadow: 0 0 8px rgba(0, 0, 0, 0.3);
+        }
+        .step-dot.active {
+            background: #3b82f6;
+            animation: pulse 1.5s infinite;
+            box-shadow: 0 0 15px rgba(59, 130, 246, 0.6);
+        }
+        .step-dot.completed {
+            background: #10b981;
+            box-shadow: 0 0 10px rgba(16, 185, 129, 0.5);
+        }
+        .step-dot.failed {
+            background: #ef4444;
+            box-shadow: 0 0 10px rgba(239, 68, 68, 0.5);
+        }
+        @keyframes pulse {
+            0%, 100% { transform: scale(1); opacity: 1; }
+            50% { transform: scale(1.3); opacity: 0.8; }
+        }
+        .step-text {
+            color: #64748b;
+            font-size: 14px;
+            transition: all 0.3s ease;
+        }
+        .step-text.active {
+            color: #3b82f6;
+            font-weight: 500;
+        }
+        .step-text.completed {
+            color: #10b981;
+            font-weight: 500;
+        }
+        .step-text.failed {
+            color: #ef4444;
+            font-weight: 500;
+        }
+        .data-timestamp {
+            position: absolute;
+            right: 20px;
+            bottom: 10px;
+            font-size: 12px;
+            color: #64748b;
+        }
+        .chart-title {
+            font-size: 14px;
+            color: #94a3b8;
+            margin-bottom: 10px;
+            text-align: center;
+            font-weight: 500;
+        }
+    </style>
+</head>
+<body>
+    <!-- 加载遮罩 -->
+    <div class="loading-overlay" id="loading-overlay">
+        <div class="loading-content">
+            <div class="loading-spinner"></div>
+            <div class="loading-text" id="loading-text">正在启动完整数据处理流程...</div>
+            <div class="loading-progress">
+                <div class="loading-progress-bar" id="loading-progress-bar"></div>
+            </div>
+            <div class="workflow-status" id="workflow-status">执行进度</div>
+            <div id="workflow-steps">
+                <div class="workflow-step">
+                    <div class="step-dot" id="step-dot-1"></div>
+                    <span class="step-text" id="step-text-1">数据生成</span>
+                </div>
+                <div class="workflow-step">
+                    <div class="step-dot" id="step-dot-2"></div>
+                    <span class="step-text" id="step-text-2">大数据分析</span>
+                </div>
+                <div class="workflow-step">
+                    <div class="step-dot" id="step-dot-3"></div>
+                    <span class="step-text" id="step-text-3">特征工程</span>
+                </div>
+                <div class="workflow-step">
+                    <div class="step-dot" id="step-dot-4"></div>
+                    <span class="step-text" id="step-text-4">模型训练</span>
+                </div>
+                <div class="workflow-step">
+                    <div class="step-dot" id="step-dot-5"></div>
+                    <span class="step-text" id="step-text-5">完成</span>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <div class="grid-container">
+        <div class="grid-item title">
+            <h1>电商大数据可视化大屏</h1>
+            <button class="refresh-btn" id="refresh-btn">
+                <span class="refresh-icon" id="refresh-icon">🔄</span>
+                <span>刷新数据（10万条）</span>
+            </button>
+            <div id="stats-bar">
+                <div class="stat-card">
+                    <div class="stat-value" id="pv-count">12,580</div>
+                    <div class="stat-label">今日PV</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-value" id="uv-count">4,320</div>
+                    <div class="stat-label">今日UV</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-value" id="order-count">856</div>
+                    <div class="stat-label">今日订单</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-value" id="sales-count">¥128,560</div>
+                    <div class="stat-label">今日销售额</div>
+                </div>
+            </div>
+            <div class="data-timestamp" id="data-timestamp">数据更新时间: --</div>
+        </div>
+        
+        <div class="grid-item traffic">
+            <div class="chart-title">📊 日流量趋势</div>
+            <div id="traffic-chart" style="height: 100%;"></div>
+        </div>
+        
+        <div class="grid-item sales">
+            <div class="chart-title">📈 类别销量统计</div>
+            <div id="sales-chart" style="height: 100%;"></div>
+        </div>
+        
+        <div class="grid-item conversion">
+            <div class="chart-title">🔄 转化漏斗</div>
+            <div id="conversion-chart" style="height: 100%;"></div>
+        </div>
+        
+        <div class="grid-item behavior">
+            <div class="chart-title">👤 用户行为分布</div>
+            <div id="behavior-chart" style="height: 100%;"></div>
+        </div>
+        
+        <div class="grid-item probability">
+            <div class="chart-title">🎯 购买概率分布</div>
+            <div id="probability-chart" style="height: 100%;"></div>
+        </div>
+        
+        <div class="grid-item realtime">
+            <div class="chart-title">⚡ 实时监控</div>
+            <div id="realtime-chart" style="height: 100%;"></div>
+        </div>
+        
+        <div class="grid-item summary">
+            <div class="chart-title">📋 数据概览</div>
+            <div id="summary-chart" style="height: 100%;"></div>
+        </div>
+    </div>
+    
+    <script>
+        // API配置 - 支持本地和Ubuntu部署
+        const API_CONFIG = {
+            // 尝试自动检测API地址
+            getBaseUrl: function() {
+                const hostname = window.location.hostname;
+                const port = window.location.port;
+                
+                // 如果是本地开发环境
+                if (hostname === 'localhost' || hostname === '127.0.0.1') {
+                    return 'http://localhost:8000';
+                }
+                // 如果是Ubuntu部署环境
+                else if (hostname !== '') {
+                    return `http://${hostname}:8000`;
+                }
+                // 默认返回localhost
+                return 'http://localhost:8000';
+            }
+        };
+        
+        const API_BASE = API_CONFIG.getBaseUrl();
+        console.log('API地址:', API_BASE);
+        
+        var charts = {
+            traffic: echarts.init(document.getElementById('traffic-chart')),
+            sales: echarts.init(document.getElementById('sales-chart')),
+            conversion: echarts.init(document.getElementById('conversion-chart')),
+            behavior: echarts.init(document.getElementById('behavior-chart')),
+            probability: echarts.init(document.getElementById('probability-chart')),
+            realtime: echarts.init(document.getElementById('realtime-chart')),
+            summary: echarts.init(document.getElementById('summary-chart'))
+        };
+        
+        var currentData = {};
+        var workflowPollTimer = null;
+        var pollAttempts = 0;
+        const MAX_POLL_ATTEMPTS = 300; // 最多轮询5分钟（300 * 1秒）
+        
+        function initCharts() {
+            // 日流量趋势图
+            var trafficOption = {
+                tooltip: { trigger: 'axis', backgroundColor: 'rgba(15, 23, 42, 0.9)', borderColor: '#3b82f6', textStyle: { color: '#fff' } },
+                legend: { data: ['PV', 'UV'], bottom: 5, textStyle: { color: '#94a3b8' } },
+                grid: { left: '3%', right: '4%', bottom: '18%', top: '15%', containLabel: true },
+                xAxis: { 
+                    type: 'category', 
+                    data: ['00:00', '04:00', '08:00', '12:00', '16:00', '20:00'], 
+                    axisLabel: { color: '#94a3b8', fontSize: 11 }, 
+                    axisLine: { lineStyle: { color: '#475569' } },
+                    axisTick: { show: false }
+                },
+                yAxis: { 
+                    type: 'value', 
+                    axisLabel: { color: '#94a3b8', fontSize: 11 }, 
+                    axisLine: { lineStyle: { color: '#475569' } }, 
+                    splitLine: { lineStyle: { color: '#1e293b', type: 'dashed' } } 
+                },
+                series: [
+                    { 
+                        name: 'PV', 
+                        type: 'line', 
+                        data: [3200, 4500, 8900, 12000, 9800, 6500], 
+                        smooth: true, 
+                        lineStyle: { color: '#3b82f6', width: 3 }, 
+                        areaStyle: { 
+                            color: { 
+                                type: 'linear', 
+                                x: 0, y: 0, x2: 0, y2: 1, 
+                                colorStops: [
+                                    { offset: 0, color: 'rgba(59, 130, 246, 0.4)' }, 
+                                    { offset: 1, color: 'rgba(59, 130, 246, 0.05)' }
+                                ] 
+                            } 
+                        },
+                        symbol: 'circle',
+                        symbolSize: 6,
+                        itemStyle: { color: '#3b82f6', borderWidth: 2, borderColor: '#fff' }
+                    },
+                    { 
+                        name: 'UV', 
+                        type: 'line', 
+                        data: [1200, 1800, 3200, 4500, 3800, 2500], 
+                        smooth: true, 
+                        lineStyle: { color: '#10b981', width: 3 }, 
+                        areaStyle: { 
+                            color: { 
+                                type: 'linear', 
+                                x: 0, y: 0, x2: 0, y2: 1, 
+                                colorStops: [
+                                    { offset: 0, color: 'rgba(16, 185, 129, 0.4)' }, 
+                                    { offset: 1, color: 'rgba(16, 185, 129, 0.05)' }
+                                ] 
+                            } 
+                        },
+                        symbol: 'circle',
+                        symbolSize: 6,
+                        itemStyle: { color: '#10b981', borderWidth: 2, borderColor: '#fff' }
+                    }
+                ]
+            };
+            
+            // 类别销量统计
+            var salesOption = {
+                tooltip: { 
+                    trigger: 'axis', 
+                    axisPointer: { type: 'shadow' },
+                    backgroundColor: 'rgba(15, 23, 42, 0.9)', 
+                    borderColor: '#3b82f6', 
+                    textStyle: { color: '#fff' } 
+                },
+                legend: { data: ['浏览量', '购买量'], bottom: 5, textStyle: { color: '#94a3b8' } },
+                grid: { left: '3%', right: '8%', bottom: '18%', top: '15%', containLabel: true },
+                xAxis: { 
+                    type: 'category', 
+                    data: ['电子产品', '服装', '食品', '家居', '美妆'], 
+                    axisLabel: { color: '#94a3b8', rotate: 15, fontSize: 11 }, 
+                    axisLine: { lineStyle: { color: '#475569' } },
+                    axisTick: { show: false }
+                },
+                yAxis: [
+                    { 
+                        type: 'value', 
+                        name: '浏览量', 
+                        position: 'left', 
+                        axisLabel: { color: '#94a3b8', fontSize: 11 }, 
+                        axisLine: { lineStyle: { color: '#475569' } }, 
+                        splitLine: { lineStyle: { color: '#1e293b', type: 'dashed' } } 
+                    },
+                    { 
+                        type: 'value', 
+                        name: '购买量', 
+                        position: 'right', 
+                        axisLabel: { color: '#94a3b8', fontSize: 11 }, 
+                        axisLine: { lineStyle: { color: '#475569' } }, 
+                        splitLine: { show: false } 
+                    }
+                ],
+                series: [
+                    { 
+                        name: '浏览量', 
+                        type: 'bar', 
+                        data: [1250, 890, 650, 420, 380], 
+                        itemStyle: { 
+                            color: '#f59e0b',
+                            borderRadius: [6, 6, 0, 0] 
+                        },
+                        barWidth: '50%'
+                    },
+                    { 
+                        name: '购买量', 
+                        type: 'line', 
+                        yAxisIndex: 1, 
+                        data: [8500, 6200, 4800, 3200, 2800], 
+                        lineStyle: { color: '#ef4444', width: 3 }, 
+                        symbol: 'circle', 
+                        symbolSize: 8,
+                        itemStyle: { color: '#ef4444', borderWidth: 2, borderColor: '#fff' }
+                    }
+                ]
+            };
+            
+            // 转化漏斗图
+            var conversionOption = {
+                tooltip: { trigger: 'item', formatter: '{b}: {c}%', backgroundColor: 'rgba(15, 23, 42, 0.9)', borderColor: '#3b82f6', textStyle: { color: '#fff' } },
+                series: [{
+                    name: '转化率',
+                    type: 'funnel',
+                    left: '10%',
+                    top: 20,
+                    bottom: 20,
+                    width: '80%',
+                    min: 0,
+                    max: 100,
+                    minSize: '0%',
+                    maxSize: '100%',
+                    sort: 'descending',
+                    gap: 3,
+                    label: { show: true, position: 'inside', color: '#fff', fontSize: 13, fontWeight: 'bold' },
+                    labelLine: { length: 15, lineStyle: { width: 2, type: 'solid', color: '#fff' } },
+                    itemStyle: { borderRadius: 6, borderColor: '#0a0e1a', borderWidth: 2 },
+                    emphasis: { label: { fontSize: 15 } },
+                    data: [
+                        { value: 100, name: '访问', itemStyle: { color: '#3b82f6' } },
+                        { value: 45, name: '浏览', itemStyle: { color: '#60a5fa' } },
+                        { value: 25, name: '加购', itemStyle: { color: '#93c5fd' } },
+                        { value: 12, name: '下单', itemStyle: { color: '#10b981' } },
+                        { value: 8, name: '成交', itemStyle: { color: '#34d399' } }
+                    ]
+                }]
+            };
+            
+            // 用户行为分布图
+            var behaviorOption = {
+                tooltip: { 
+                    trigger: 'item', 
+                    formatter: '{b}: {c} ({d}%)',
+                    backgroundColor: 'rgba(15, 23, 42, 0.9)', 
+                    borderColor: '#3b82f6', 
+                    textStyle: { color: '#fff' } 
+                },
+                legend: { orient: 'vertical', left: '5%', bottom: 5, textStyle: { color: '#94a3b8', fontSize: 12 } },
+                series: [{
+                    name: '行为类型',
+                    type: 'pie',
+                    radius: ['45%', '75%'],
+                    center: ['55%', '50%'],
+                    avoidLabelOverlap: false,
+                    itemStyle: { borderRadius: 10, borderColor: '#0a0e1a', borderWidth: 3 },
+                    label: { show: false },
+                    emphasis: { 
+                        label: { show: true, fontSize: 15, fontWeight: 'bold', color: '#fff' },
+                        itemStyle: { shadowBlur: 20, shadowOffsetX: 0, shadowColor: 'rgba(0, 0, 0, 0.6)' }
+                    },
+                    labelLine: { show: false },
+                    data: [
+                        { value: 7000, name: '浏览', itemStyle: { color: '#3b82f6' } },
+                        { value: 1500, name: '加购', itemStyle: { color: '#f59e0b' } },
+                        { value: 1000, name: '购买', itemStyle: { color: '#10b981' } },
+                        { value: 500, name: '收藏', itemStyle: { color: '#8b5cf6' } }
+                    ]
+                }]
+            };
+            
+            // 购买概率分布图
+            var probabilityOption = {
+                tooltip: { 
+                    trigger: 'axis', 
+                    axisPointer: { type: 'shadow' },
+                    backgroundColor: 'rgba(15, 23, 42, 0.9)', 
+                    borderColor: '#3b82f6', 
+                    textStyle: { color: '#fff' } 
+                },
+                grid: { left: '3%', right: '4%', bottom: '10%', top: '15%', containLabel: true },
+                xAxis: { 
+                    type: 'value', 
+                    name: '概率区间', 
+                    nameTextStyle: { color: '#94a3b8' },
+                    axisLabel: { color: '#94a3b8', fontSize: 10 }, 
+                    axisLine: { lineStyle: { color: '#475569' } }, 
+                    splitLine: { lineStyle: { color: '#1e293b', type: 'dashed' } },
+                    interval: 0.1
+                },
+                yAxis: { 
+                    type: 'value', 
+                    name: '用户数', 
+                    nameTextStyle: { color: '#94a3b8' },
+                    axisLabel: { color: '#94a3b8', fontSize: 11 }, 
+                    axisLine: { lineStyle: { color: '#475569' } }, 
+                    splitLine: { lineStyle: { color: '#1e293b', type: 'dashed' } } 
+                },
+                series: [{
+                    name: '用户分布',
+                    type: 'bar',
+                    data: [
+                        { value: 120, itemStyle: { color: '#ef4444', borderRadius: [4, 4, 0, 0] } },
+                        { value: 180, itemStyle: { color: '#f97316', borderRadius: [4, 4, 0, 0] } },
+                        { value: 250, itemStyle: { color: '#f59e0b', borderRadius: [4, 4, 0, 0] } },
+                        { value: 320, itemStyle: { color: '#eab308', borderRadius: [4, 4, 0, 0] } },
+                        { value: 380, itemStyle: { color: '#84cc16', borderRadius: [4, 4, 0, 0] } },
+                        { value: 420, itemStyle: { color: '#22c55e', borderRadius: [4, 4, 0, 0] } },
+                        { value: 350, itemStyle: { color: '#10b981', borderRadius: [4, 4, 0, 0] } },
+                        { value: 280, itemStyle: { color: '#14b8a6', borderRadius: [4, 4, 0, 0] } },
+                        { value: 200, itemStyle: { color: '#06b6d4', borderRadius: [4, 4, 0, 0] } },
+                        { value: 150, itemStyle: { color: '#0ea5e9', borderRadius: [4, 4, 0, 0] } }
+                    ],
+                    barWidth: '70%'
+                }]
+            };
+            
+            // 实时监控图
+            var realtimeOption = {
+                tooltip: { 
+                    trigger: 'axis',
+                    backgroundColor: 'rgba(15, 23, 42, 0.9)', 
+                    borderColor: '#3b82f6', 
+                    textStyle: { color: '#fff' } 
+                },
+                grid: { left: '3%', right: '4%', bottom: '10%', top: '15%', containLabel: true },
+                xAxis: { 
+                    type: 'category', 
+                    data: ['--', '--', '--', '--', '--'], 
+                    axisLabel: { color: '#94a3b8', fontSize: 10 }, 
+                    axisLine: { lineStyle: { color: '#475569' } },
+                    axisTick: { show: false }
+                },
+                yAxis: { 
+                    type: 'value', 
+                    axisLabel: { color: '#94a3b8', fontSize: 11 }, 
+                    axisLine: { lineStyle: { color: '#475569' } }, 
+                    splitLine: { lineStyle: { color: '#1e293b', type: 'dashed' } } 
+                },
+                series: [{
+                    name: '实时流量',
+                    type: 'line',
+                    smooth: true,
+                    data: [2500, 3200, 2800, 3500, 3000],
+                    lineStyle: { color: '#10b981', width: 3 },
+                    areaStyle: { 
+                        color: { 
+                            type: 'linear', 
+                            x: 0, y: 0, x2: 0, y2: 1, 
+                            colorStops: [
+                                { offset: 0, color: 'rgba(16, 185, 129, 0.4)' }, 
+                                { offset: 1, color: 'rgba(16, 185, 129, 0.05)' }
+                            ] 
+                        } 
+                    },
+                    symbol: 'circle',
+                    symbolSize: 6,
+                    itemStyle: { color: '#10b981', borderWidth: 2, borderColor: '#fff' }
+                }]
+            };
+            
+            // 数据概览图
+            var summaryOption = {
+                grid: { left: '5%', right: '5%', top: 25, bottom: 10 },
+                xAxis: { 
+                    type: 'category', 
+                    data: ['流量', '订单', '转化', '销售'], 
+                    axisLabel: { color: '#94a3b8', fontSize: 12 }, 
+                    axisLine: { lineStyle: { color: '#475569' } },
+                    axisTick: { show: false }
+                },
+                yAxis: { 
+                    type: 'value', 
+                    max: 100,
+                    axisLabel: { color: '#94a3b8', fontSize: 11 }, 
+                    axisLine: { lineStyle: { color: '#475569' } }, 
+                    splitLine: { lineStyle: { color: '#1e293b', type: 'dashed' } } 
+                },
+                series: [{
+                    type: 'bar',
+                    data: [85, 72, 68, 90],
+                    itemStyle: { 
+                        color: ['#3b82f6', '#10b981', '#f59e0b', '#ef4444'],
+                        borderRadius: [6, 6, 0, 0]
+                    },
+                    barWidth: '45%',
+                    label: {
+                        show: true,
+                        position: 'top',
+                        color: '#94a3b8',
+                        fontSize: 12,
+                        formatter: '{c}%'
+                    }
+                }]
+            };
+            
+            charts.traffic.setOption(trafficOption);
+            charts.sales.setOption(salesOption);
+            charts.conversion.setOption(conversionOption);
+            charts.behavior.setOption(behaviorOption);
+            charts.probability.setOption(probabilityOption);
+            charts.realtime.setOption(realtimeOption);
+            charts.summary.setOption(summaryOption);
+        }
+        
+        function updateCharts(data) {
+            const totalPV = data.category_stats?.reduce((sum, c) => sum + c.pv_count, 0) || 12580;
+            const totalBuy = data.category_stats?.reduce((sum, c) => sum + c.buy_count, 0) || 856;
+            
+            // 更新统计卡片
+            document.getElementById('pv-count').innerHTML = totalPV.toLocaleString();
+            document.getElementById('uv-count').innerHTML = Math.round(totalPV * 0.35).toLocaleString();
+            document.getElementById('order-count').innerHTML = totalBuy.toString();
+            document.getElementById('sales-count').innerHTML = '¥' + Math.round(totalBuy * 150).toLocaleString();
+            
+            // 更新时间戳
+            if (data.generation_time) {
+                document.getElementById('data-timestamp').innerHTML = '数据更新时间: ' + data.generation_time;
+            }
+            
+            // 更新类别销量统计
+            if (data.category_stats && data.category_stats.length > 0) {
+                const topCategories = data.category_stats.slice(0, 5);
+                charts.sales.setOption({
+                    xAxis: { data: topCategories.map(c => c.category_name) },
+                    series: [
+                        { data: topCategories.map(c => Math.round(c.pv_count / 100)) },
+                        { data: topCategories.map(c => c.buy_count) }
+                    ]
+                });
+            }
+            
+            // 更新转化漏斗
+            if (data.funnel_analysis && data.funnel_analysis.length > 0) {
+                const pvToCart = data.funnel_analysis.find(f => f.metric === '浏览到加购转化率')?.value || 0.2;
+                const cartToBuy = data.funnel_analysis.find(f => f.metric === '加购到购买转化率')?.value || 0.3;
+                const overall = data.funnel_analysis.find(f => f.metric === '整体转化率')?.value || 0.08;
+                
+                charts.conversion.setOption({
+                    series: [{
+                        data: [
+                            { value: 100, name: '访问', itemStyle: { color: '#3b82f6' } },
+                            { value: Math.round(pvToCart * 100), name: '加购', itemStyle: { color: '#60a5fa' } },
+                            { value: Math.round(cartToBuy * 100), name: '下单', itemStyle: { color: '#93c5fd' } },
+                            { value: Math.round(overall * 100), name: '成交', itemStyle: { color: '#10b981' } }
+                        ]
+                    }]
+                });
+            }
+            
+            // 更新用户行为分布
+            if (data.user_profile && data.user_profile.length > 0) {
+                const totalPV = data.user_profile.reduce((sum, u) => sum + u.pv_count, 0);
+                const totalCart = data.user_profile.reduce((sum, u) => sum + u.cart_count, 0);
+                const totalBuy = data.user_profile.reduce((sum, u) => sum + u.buy_count, 0);
+                const totalFav = data.user_profile.reduce((sum, u) => sum + u.fav_count, 0);
+                
+                charts.behavior.setOption({
+                    series: [{
+                        data: [
+                            { value: totalPV, name: '浏览', itemStyle: { color: '#3b82f6' } },
+                            { value: totalCart, name: '加购', itemStyle: { color: '#f59e0b' } },
+                            { value: totalBuy, name: '购买', itemStyle: { color: '#10b981' } },
+                            { value: totalFav, name: '收藏', itemStyle: { color: '#8b5cf6' } }
+                        ]
+                    }]
+                });
+            }
+            
+            // 更新购买概率分布
+            if (data.purchase_probability && data.purchase_probability.length > 0) {
+                const probBins = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+                data.purchase_probability.forEach(p => {
+                    const bin = Math.floor(p.buy_probability * 10);
+                    if (bin >= 0 && bin < 10) {
+                        probBins[bin]++;
+                    }
+                });
+                
+                const colors = ['#ef4444', '#f97316', '#f59e0b', '#eab308', '#84cc16', '#22c55e', '#10b981', '#14b8a6', '#06b6d4', '#0ea5e9'];
+                charts.probability.setOption({
+                    series: [{
+                        data: probBins.map((count, index) => ({
+                            value: count,
+                            itemStyle: { color: colors[index], borderRadius: [4, 4, 0, 0] }
+                        }))
+                    }]
+                });
+            }
+            
+            // 更新数据概览
+            if (data.channel_stats && data.channel_stats.length > 0) {
+                const totalChannelPV = data.channel_stats.reduce((sum, c) => sum + c.pv_count, 0);
+                const totalBuy = data.channel_stats.reduce((sum, c) => sum + c.buy_count, 0);
+                const avgConversion = totalChannelPV > 0 ? (totalBuy / totalChannelPV) * 100 : 0;
+                
+                charts.summary.setOption({
+                    series: [{
+                        data: [
+                            Math.min(100, Math.round(totalChannelPV / 1000)),
+                            Math.min(100, Math.round(totalBuy / 50)),
+                            Math.round(avgConversion),
+                            90
+                        ]
+                    }]
+                });
+            }
+        }
+        
+        window.realtimeData = { labels: [], values: [] };
+        
+        function updateRealtime() {
+            var now = new Date();
+            var time = now.toLocaleTimeString().substring(0, 5);
+            
+            window.realtimeData.labels.push(time);
+            window.realtimeData.values.push(Math.floor(Math.random() * 1000) + 2000);
+            
+            if (window.realtimeData.labels.length > 10) {
+                window.realtimeData.labels.shift();
+                window.realtimeData.values.shift();
+            }
+            
+            charts.realtime.setOption({
+                xAxis: { data: window.realtimeData.labels },
+                series: [{
+                    data: window.realtimeData.values
+                }]
+            });
+        }
+        
+        function updateStepStatus(stepIndex, status) {
+            const dot = document.getElementById(`step-dot-${stepIndex}`);
+            const text = document.getElementById(`step-text-${stepIndex}`);
+            
+            if (dot && text) {
+                dot.className = `step-dot ${status}`;
+                text.className = `step-text ${status}`;
+            }
+        }
+        
+        function pollWorkflowStatus() {
+            pollAttempts++;
+            
+            // 超时检查
+            if (pollAttempts > MAX_POLL_ATTEMPTS) {
+                console.error('工作流轮询超时');
+                clearInterval(workflowPollTimer);
+                workflowPollTimer = null;
+                handleWorkflowError('工作流执行超时，请检查后端服务状态');
+                return;
+            }
+            
+            fetch(`${API_BASE}/workflow/status`)
+                .then(response => {
+                    if (!response.ok) {
+                        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                    }
+                    return response.json();
+                })
+                .then(status => {
+                    const progressBar = document.getElementById('loading-progress-bar');
+                    const loadingText = document.getElementById('loading-text');
+                    const workflowStatus = document.getElementById('workflow-status');
+                    
+                    progressBar.style.width = `${status.progress}%`;
+                    loadingText.textContent = status.message;
+                    workflowStatus.textContent = `执行进度: ${status.progress}% - ${status.current_step}`;
+                    
+                    // 更新步骤状态
+                    updateStepStatusByStep(status.current_step);
+                    
+                    // 检查是否完成
+                    if (!status.running) {
+                        clearInterval(workflowPollTimer);
+                        workflowPollTimer = null;
+                        
+                        if (status.error) {
+                            handleWorkflowError(status.error);
+                        } else {
+                            handleWorkflowSuccess();
+                        }
+                    }
+                })
+                .catch(error => {
+                    console.error('轮询工作流状态失败:', error);
+                    // 网络错误时继续尝试，直到达到最大尝试次数
+                    if (pollAttempts >= MAX_POLL_ATTEMPTS) {
+                        clearInterval(workflowPollTimer);
+                        workflowPollTimer = null;
+                        handleWorkflowError(`无法连接到服务器: ${error.message}`);
+                    }
+                });
+        }
+        
+        function updateStepStatusByStep(currentStep) {
+            // 重置所有步骤状态
+            for (let i = 1; i <= 5; i++) {
+                updateStepStatus(i, '');
+            }
+            
+            // 根据当前步骤设置状态
+            switch(currentStep) {
+                case '数据生成':
+                    updateStepStatus(1, 'active');
+                    break;
+                case '大数据分析':
+                    updateStepStatus(1, 'completed');
+                    updateStepStatus(2, 'active');
+                    break;
+                case '特征工程':
+                    updateStepStatus(1, 'completed');
+                    updateStepStatus(2, 'completed');
+                    updateStepStatus(3, 'active');
+                    break;
+                case '模型训练':
+                    updateStepStatus(1, 'completed');
+                    updateStepStatus(2, 'completed');
+                    updateStepStatus(3, 'completed');
+                    updateStepStatus(4, 'active');
+                    break;
+                case '完成':
+                    updateStepStatus(1, 'completed');
+                    updateStepStatus(2, 'completed');
+                    updateStepStatus(3, 'completed');
+                    updateStepStatus(4, 'completed');
+                    updateStepStatus(5, 'completed');
+                    break;
+                case '失败':
+                    updateStepStatus(5, 'failed');
+                    break;
+            }
+        }
+        
+        function handleWorkflowError(errorMessage) {
+            const loadingText = document.getElementById('loading-text');
+            const workflowStatus = document.getElementById('workflow-status');
+            
+            loadingText.textContent = `执行失败: ${errorMessage}`;
+            workflowStatus.textContent = '执行失败';
+            workflowStatus.style.color = '#ef4444';
+            
+            setTimeout(() => {
+                resetUIState();
+            }, 3000);
+        }
+        
+        function handleWorkflowSuccess() {
+            const loadingText = document.getElementById('loading-text');
+            const workflowStatus = document.getElementById('workflow-status');
+            
+            loadingText.textContent = '数据处理完成，正在更新可视化...';
+            workflowStatus.textContent = '执行成功';
+            workflowStatus.style.color = '#10b981';
+            
+            // 获取分析结果并更新图表
+            fetchAnalysisResults();
+        }
+        
+        function resetUIState() {
+            document.getElementById('loading-overlay').classList.remove('show');
+            const btn = document.getElementById('refresh-btn');
+            btn.disabled = false;
+            btn.classList.remove('loading');
+            document.getElementById('refresh-icon').classList.remove('spin');
+            
+            // 重置步骤状态
+            for (let i = 1; i <= 5; i++) {
+                const dot = document.getElementById(`step-dot-${i}`);
+                const text = document.getElementById(`step-text-${i}`);
+                if (dot) dot.className = 'step-dot';
+                if (text) text.className = 'step-text';
+            }
+            
+            // 重置轮询计数器
+            pollAttempts = 0;
+        }
+        
+        function fetchAnalysisResults() {
+            fetch(`${API_BASE}/analysis/results`)
+                .then(response => {
+                    if (!response.ok) {
+                        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                    }
+                    return response.json();
+                })
+                .then(data => {
+                    console.log('获取到分析结果:', data);
+                    currentData = data;
+                    
+                    // 更新数据时间戳
+                    if (data.generation_time) {
+                        document.getElementById('data-timestamp').textContent = 
+                            `数据更新时间: ${data.generation_time} | 数据量: ${data.data_count?.toLocaleString() || 'N/A'} 条`;
+                    }
+                    
+                    // 更新所有图表
+                    updateCharts(currentData);
+                    
+                    // 更新统计卡片
+                    updateStatCards(currentData);
+                    
+                    setTimeout(() => {
+                        resetUIState();
+                    }, 1000);
+                })
+                .catch(error => {
+                    console.error('获取分析结果失败:', error);
+                    handleWorkflowError(`获取分析结果失败: ${error.message}`);
+                });
+        }
+        
+        function updateStatCards(data) {
+            // 基于真实数据更新统计卡片
+            let totalPV = 0;
+            let totalUV = 0;
+            let totalOrders = 0;
+            let totalSales = 0;
+            
+            if (data.category_stats && data.category_stats.length > 0) {
+                totalPV = data.category_stats.reduce((sum, cat) => sum + cat.pv_count, 0);
+                totalOrders = data.category_stats.reduce((sum, cat) => sum + cat.buy_count, 0);
+                totalUV = Math.floor(totalPV * 0.35); // 估算UV
+                totalSales = totalOrders * 150; // 估算销售额
+            }
+            
+            // 动画更新数字
+            animateValue('pv-count', totalPV);
+            animateValue('uv-count', totalUV);
+            animateValue('order-count', totalOrders);
+            document.getElementById('sales-count').textContent = `¥${totalSales.toLocaleString()}`;
+        }
+        
+        function animateValue(elementId, endValue) {
+            const element = document.getElementById(elementId);
+            const startValue = parseInt(element.textContent.replace(/,/g, '')) || 0;
+            const duration = 1000;
+            const startTime = performance.now();
+            
+            function update(currentTime) {
+                const elapsed = currentTime - startTime;
+                const progress = Math.min(elapsed / duration, 1);
+                
+                // 缓动函数
+                const easeOutQuart = 1 - Math.pow(1 - progress, 4);
+                const currentValue = Math.floor(startValue + (endValue - startValue) * easeOutQuart);
+                
+                element.textContent = currentValue.toLocaleString();
+                
+                if (progress < 1) {
+                    requestAnimationFrame(update);
+                }
+            }
+            
+            requestAnimationFrame(update);
+        }
+        
+        async function refreshData() {
+            const btn = document.getElementById('refresh-btn');
+            const icon = document.getElementById('refresh-icon');
+            const overlay = document.getElementById('loading-overlay');
+            const loadingText = document.getElementById('loading-text');
+            const progressBar = document.getElementById('loading-progress-bar');
+            const workflowStatus = document.getElementById('workflow-status');
+            
+            // 重置轮询计数器
+            pollAttempts = 0;
+            
+            // 禁用按钮并显示加载状态
+            btn.disabled = true;
+            btn.classList.add('loading');
+            icon.classList.add('spin');
+            overlay.classList.add('show');
+            progressBar.style.width = '0%';
+            loadingText.textContent = '正在启动完整数据处理流程...';
+            workflowStatus.textContent = '准备中...';
+            workflowStatus.style.color = '#10b981';
+            
+            // 重置所有步骤状态
+            for (let i = 1; i <= 5; i++) {
+                const dot = document.getElementById(`step-dot-${i}`);
+                const text = document.getElementById(`step-text-${i}`);
+                if (dot) dot.className = 'step-dot';
+                if (text) text.className = 'step-text';
+            }
+            
+            try {
+                console.log('启动工作流，API地址:', API_BASE);
+                
+                const response = await fetch(`${API_BASE}/workflow/run`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ 
+                        count: 100000, 
+                        output_dir: 'data/logs' 
+                    })
+                });
+                
+                if (!response.ok) {
+                    const errorData = await response.json().catch(() => ({ detail: '未知错误' }));
+                    throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
+                }
+                
+                const result = await response.json();
+                console.log('工作流启动成功:', result);
+                
+                loadingText.textContent = result.message || '工作流已启动...';
+                
+                // 开始轮询工作流状态
+                if (workflowPollTimer) {
+                    clearInterval(workflowPollTimer);
+                }
+                workflowPollTimer = setInterval(pollWorkflowStatus, 1000); // 每秒轮询一次
+                
+            } catch (error) {
+                console.error('刷新数据失败:', error);
+                handleWorkflowError(`启动工作流失败: ${error.message}`);
+            }
+        }
+        
+        // 页面加载完成后初始化
+        window.addEventListener('load', async function() {
+            console.log('页面加载完成，API地址:', API_BASE);
+            
+            // 初始化图表
+            initCharts();
+            
+            // 尝试获取初始数据
+            try {
+                const response = await fetch(`${API_BASE}/analysis/results`);
+                if (response.ok) {
+                    const data = await response.json();
+                    console.log('获取到初始数据:', data);
+                    currentData = data;
+                    updateCharts(currentData);
+                    updateStatCards(currentData);
+                    
+                    if (data.generation_time) {
+                        document.getElementById('data-timestamp').textContent = 
+                            `数据更新时间: ${data.generation_time} | 数据量: ${data.data_count?.toLocaleString() || 'N/A'} 条`;
+                    }
+                } else {
+                    console.log('无法获取初始数据，使用默认数据');
+                }
+            } catch (error) {
+                console.log('无法获取初始数据，使用默认数据:', error.message);
+            }
+            
+            // 启动实时监控
+            setInterval(updateRealtime, 2000);
+            
+            // 绑定刷新按钮事件
+            const refreshBtn = document.getElementById('refresh-btn');
+            if (refreshBtn) {
+                refreshBtn.addEventListener('click', refreshData);
+                console.log('刷新按钮事件绑定成功');
+            }
+        });
+        
+        // 窗口大小改变时重新调整图表
+        window.addEventListener('resize', function() {
+            Object.values(charts).forEach(chart => chart.resize());
+        });
+    </script>
+</body>
+</html>

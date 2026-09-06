@@ -1,0 +1,18 @@
+# ===== 运行数据与密钥（绝不提交）=====
+data/
+models/
+logs/
+tmp/
+.env
+
+# ===== Python =====
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# ===== 系统 / 编辑器 =====
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
