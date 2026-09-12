@@ -81,7 +81,11 @@ def parse_args():
     parser.add_argument("--window", type=int, default=60, help="滑动窗口时长（秒）")
     parser.add_argument("--slide", type=int, default=10, help="滑动步长（秒）")
     parser.add_argument("--starting-offsets", default="latest", choices=["latest", "earliest"])
-    parser.add_argument("--checkpoint", default="/tmp/spark-checkpoint/sensor-streaming")
+    parser.add_argument("--checkpoint", default=None,
+                        help="checkpoint 根目录；每个 sink 自动使用其独立子目录。"
+                             "默认取 --warehouse-dir 同级的 checkpoint/sensor-streaming")
+    parser.add_argument("--fail-on-data-loss", action="store_true",
+                        help="Kafka 分区偏移越界/数据被清理时直接抛错。默认 False（保持原行为：静默跳过，可能丢数据）")
     parser.add_argument("--metastore-uris", default="thrift://hive-metastore:9083",
                         help="Hive Metastore 地址（宿主机直连用 thrift://localhost:9083）")
     parser.add_argument("--warehouse-dir", default="hdfs://hadoop-namenode:8020/user/hive/warehouse")
@@ -89,8 +93,29 @@ def parse_args():
     return parser.parse_args()
 
 
+def default_checkpoint_root(warehouse_dir):
+    """默认 checkpoint 根目录：与 warehouse 同级的 checkpoint/ 子目录（放在 HDFS 上，容器重建不丢进度）。
+
+    hdfs://nn:8020/user/hive/warehouse -> hdfs://nn:8020/user/hive/checkpoint/sensor-streaming
+    """
+    base = (warehouse_dir or "").rstrip("/")
+    if not base:
+        return "/tmp/spark-checkpoint/sensor-streaming"
+    if "/" not in base:
+        return base + "/checkpoint/sensor-streaming"
+    return base.rsplit("/", 1)[0] + "/checkpoint/sensor-streaming"
+
+
 def main():
     args = parse_args()
+
+    # checkpoint 根目录：显式传入优先，否则落在 warehouse 同级的 checkpoint/ 下
+    ckpt_root = (args.checkpoint or default_checkpoint_root(args.warehouse_dir)).rstrip("/")
+    # 每个 OutputStream 必须独占自己的 checkpoint 目录，
+    # 否则第二个流启动会报 "checkpoint directory ... already in use"
+    ckpt_ods_dwd = f"{ckpt_root}/ods-dwd"
+    ckpt_dws_ads = f"{ckpt_root}/dws-ads"
+
     builder = SparkSession.builder.appName("SensorStreaming").enableHiveSupport()
     if args.master:
         builder = builder.master(args.master)
@@ -106,6 +131,15 @@ def main():
     print(f"  Kafka: {args.bootstrap}/{args.topic}")
     print(f"  窗口: {args.window}s / 滑动 {args.slide}s")
     print(f"  Metastore: {args.metastore_uris}")
+    print(f"  Checkpoint 根目录: {ckpt_root}")
+    print(f"    - ODS/DWD 流: {ckpt_ods_dwd}")
+    print(f"    - DWS/ADS 流: {ckpt_dws_ads}")
+    if args.fail_on_data_loss:
+        print("  failOnDataLoss: true（严格模式，偏移越界直接失败）")
+    else:
+        print("  [警告] failOnDataLoss: false —— 当前允许静默丢数据：")
+        print("         Kafka 分区偏移越界或数据被 retention 清理时会被直接跳过且不报错。")
+        print("         需要暴露该问题请加 --fail-on-data-loss")
     print("=" * 60)
 
     # 1) 建库建表（幂等）
@@ -122,7 +156,7 @@ def main():
            .option("kafka.bootstrap.servers", args.bootstrap)
            .option("subscribe", args.topic)
            .option("startingOffsets", args.starting_offsets)
-           .option("failOnDataLoss", "false")
+           .option("failOnDataLoss", "true" if args.fail_on_data_loss else "false")
            .load()
            .selectExpr("CAST(value AS STRING) AS raw_json"))
 
@@ -189,12 +223,14 @@ def main():
 
     q1 = (parsed.writeStream
           .foreachBatch(sink_ods_dwd)
+          .option("checkpointLocation", ckpt_ods_dwd)
           .outputMode("append")
           .trigger(processingTime="5 seconds")
           .start())
 
     q2 = (agg.writeStream
           .foreachBatch(sink_dws_ads)
+          .option("checkpointLocation", ckpt_dws_ads)
           .outputMode("update")
           .trigger(processingTime="5 seconds")
           .start())

@@ -1576,6 +1576,30 @@
             };
         });
 
+        // 坐标轴范围按实际点位动态计算：换城市 / 换坐标系都不需要改代码。
+        // 原来硬编码的是北京一带（116.1~116.8 / 39.65~40.05），
+        // 而 /map/data 返回的是陕西安塞（约 109.0~109.6 / 36.7~37.0），
+        // 散点全部落在轴范围外，被 ECharts 裁掉导致地图一片空白。
+        var lngs = [], lats = [];
+        mapData.forEach(function(d) {
+            if (!d.coords) return;
+            var lng = Number(d.coords[0]), lat = Number(d.coords[1]);
+            if (isFinite(lng) && isFinite(lat)) { lngs.push(lng); lats.push(lat); }
+        });
+        function axisRange(values, padding) {
+            if (!values.length) return null;                    // 无有效坐标时交给 ECharts 自动计算
+            var lo = Math.min.apply(null, values), hi = Math.max.apply(null, values);
+            if (hi - lo < 1e-6) { lo -= 0.01; hi += 0.01; }      // 单点/坐标重合时给一个最小跨度
+            var pad = (hi - lo) * padding;
+            return [lo - pad, hi + pad];
+        }
+        var lngRange = axisRange(lngs, 0.15);
+        var latRange = axisRange(lats, 0.15);
+        var xAxisOpt = { type: 'value', show: false, scale: true };
+        var yAxisOpt = { type: 'value', show: false, scale: true };
+        if (lngRange) { xAxisOpt.min = lngRange[0]; xAxisOpt.max = lngRange[1]; }
+        if (latRange) { yAxisOpt.min = latRange[0]; yAxisOpt.max = latRange[1]; }
+
         charts.map.setOption({
             tooltip: {
                 trigger: 'item',
@@ -1588,14 +1612,8 @@
                         '预警数量: ' + v[5] + ' 条';
                 }
             },
-            xAxis: {
-                type: 'value', min: 116.1, max: 116.8,
-                show: false, scale: true
-            },
-            yAxis: {
-                type: 'value', min: 39.65, max: 40.05,
-                show: false, scale: true
-            },
+            xAxis: xAxisOpt,
+            yAxis: yAxisOpt,
             grid: { top: 10, right: 10, bottom: 10, left: 10 },
             series: [
                 {

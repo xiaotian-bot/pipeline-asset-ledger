@@ -12,10 +12,10 @@
 6. 工作流执行接口
 """
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Request, Header
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Request, Header, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import RedirectResponse, StreamingResponse, HTMLResponse
+from fastapi.responses import RedirectResponse, StreamingResponse, HTMLResponse, FileResponse
 from pydantic import BaseModel
 from typing import Optional
 import pandas as pd
@@ -223,18 +223,50 @@ WRITE_ROLES = ["super_admin", "admin", "oam_lead", "oam"]
 
 
 def load_json_list(path: str) -> list:
-    if os.path.exists(path):
+    """读 JSON 列表，**区分"文件不存在/空文件"与"文件损坏"**。
+
+    原实现把解析失败也返回 []，于是损坏的工单文件被当成"没有工单" → 自动建单的去重失效
+    → 每轮扫描重复建单；同时"面板显示有账、磁盘上其实没有"。损坏时改为 fail fast 并留一份
+    .corrupt 备份（否则紧接着的一次写入就把原始内容永久覆盖，无法再排查）。
+    """
+    if not os.path.exists(path):
+        return []            # 文件不存在 = 还没有数据，正常
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            raw = f.read().strip()
+        if not raw:
+            return []        # 空文件 = 还没有数据，正常
+        data = json.loads(raw)
+        if not isinstance(data, list):
+            raise ValueError(f"顶层不是列表，而是 {type(data).__name__}")
+        return data
+    except Exception as e:
+        bak = path + ".corrupt"
         try:
-            with open(path, "r", encoding="utf-8") as f:
-                return json.load(f)
+            if not os.path.exists(bak):
+                with open(path, "rb") as src, open(bak, "wb") as dst:
+                    dst.write(src.read())
         except Exception:
-            return []
-    return []
+            pass
+        raise RuntimeError(f"数据文件损坏，已备份到 {bak}：{path}：{type(e).__name__}: {e}")
 
 
 def save_json_list(path: str, items: list):
-    with open(path, "w", encoding="utf-8") as f:
+    """原子写：临时文件 + fsync + os.replace。
+
+    原实现直接 open(path, "w") 覆盖，写到一半崩溃或并发写会留下半个 JSON，而读取端又把
+    损坏当成空列表 —— 结果是静默丢数据。临时文件 + os.replace 是同一文件系统内的原子替换，
+    要么是旧内容、要么是完整新内容，不存在半截状态。
+    """
+    d = os.path.dirname(path)
+    if d:
+        os.makedirs(d, exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
         json.dump(items[-3000:], f, ensure_ascii=False, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
 
 
 def load_commands() -> list:
@@ -828,6 +860,9 @@ def simulate_analysis():
             "status": np.random.choice(["未处理", "处理中", "已处理"], p=[0.3, 0.3, 0.4]),
             "push_status": "未推送",
             "push_channels": [],
+            # 模拟数据必须自带来源标记：否则它会被「一键推送未处理」真实推送到微信/邮箱，
+            # 也会被 DeepSeek Agent 当作真实情况念给用户。推送与 Agent 上下文按此过滤。
+            "source": "mock",
         })
     alert_list.sort(key=lambda x: x["create_time"], reverse=True)
 
@@ -848,6 +883,31 @@ def simulate_analysis():
             "urgent_alerts": len([a for a in region_alerts if a["level"] == "紧急"]),
         })
 
+    # 真实预警不能因为一次"重新分析"被模拟数据顶掉。原来这里整体重绑 analysis_results，
+    # 一次调用就把预测预警与传感器预警换成 15 条随机模拟预警，于是：
+    #   ① 台账 / 工单 / 反馈里存的 alert_id 立刻变成悬空外键；
+    #   ② 这 15 条假预警会被「一键推送未处理」真实推送到微信/邮箱；
+    #   ③ Agent 会把它们当真实情况念给用户。
+    # 现在改为「模拟预警 + 保留全部真实预警」，模拟预警带 source=mock 供推送/Agent 过滤。
+    preserved = [a for a in (analysis_results.get("alert_list") or [])
+                 if a.get("source") in ("prediction", "sensor")]
+    # 再兜一层：凡仍被未闭环工单或预测台账引用的 alert_id，一律保留，避免外键悬空。
+    try:
+        referenced = {o.get("alert_id") for o in load_workorders()
+                      if o.get("alert_id") and o.get("status") != "已闭环"}
+        referenced |= {r.get("alert_base") or r.get("alert_id")
+                       for r in (predict_ledger.recent_records(limit=500) or [])}
+        referenced.discard(None)
+        have = {a.get("alert_id") for a in preserved}
+        for a in (analysis_results.get("alert_list") or []):
+            if a.get("alert_id") in referenced and a.get("alert_id") not in have:
+                preserved.append(a)
+                have.add(a.get("alert_id"))
+    except Exception as e:
+        print(f"[simulate_analysis] 保留被引用预警时出错（不影响主流程）: {e}")
+    merged_alerts = alert_list + preserved
+    merged_alerts.sort(key=lambda x: str(x.get("create_time") or ""), reverse=True)
+
     analysis_results = {
         "asset_overview": overview,
         "asset_distribution": distribution,
@@ -858,7 +918,7 @@ def simulate_analysis():
         "ownership_summary": ownership,
         "ownership_changes": ownership_changes,
         "risk_ranking": risk_ranking,
-        "alert_list": alert_list,
+        "alert_list": merged_alerts,
         "map_data": map_data,
         "generation_time": pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S'),
         "data_count": total_assets,
@@ -1268,6 +1328,106 @@ def get_lifecycle_cost_summary(authorization: Optional[str] = Header(None), star
     get_current_user(authorization)
     data = apply_time_filter(analysis_results, start_date, end_date)
     return data.get("lifecycle_cost_summary", [])
+
+
+# ==============================================================================
+# 生命周期档案 - 附件上传 / 下载 / 删除（真实文件存储）
+# ==============================================================================
+ATTACHMENTS_DIR = os.path.join(DATA_DIR, "uploads")
+ATTACHMENTS_META = os.path.join(DATA_DIR, "attachments.json")
+ATTACHMENT_STAGES = ("purchase", "construction", "oam", "renovate", "scrap", "general")
+
+
+def load_attachments() -> list:
+    if os.path.exists(ATTACHMENTS_META):
+        try:
+            with open(ATTACHMENTS_META, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return []
+    return []
+
+
+def save_attachments(items: list):
+    try:
+        with open(ATTACHMENTS_META, "w", encoding="utf-8") as f:
+            json.dump(items[-2000:], f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+
+@app.post("/lifecycle/attachment/upload")
+async def upload_lifecycle_attachment(asset_id: str = Form(...), stage: str = Form("general"),
+                                      file: UploadFile = File(...),
+                                      authorization: Optional[str] = Header(None)):
+    """上传生命周期档案附件到服务器（data/uploads/），刷新 / 跨设备可下载。"""
+    user = get_current_user(authorization)
+    require_role(user, WRITE_ROLES)
+    if stage not in ATTACHMENT_STAGES:
+        stage = "general"
+    os.makedirs(ATTACHMENTS_DIR, exist_ok=True)
+    fid = "att-" + uuid.uuid4().hex[:12]
+    safe_name = os.path.basename(file.filename or "file")
+    ext = os.path.splitext(safe_name)[1]
+    saved_path = os.path.join(ATTACHMENTS_DIR, fid + ext)
+    try:
+        content = await file.read()
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"读取上传文件失败: {e}")
+    with open(saved_path, "wb") as f:
+        f.write(content)
+    rec = {
+        "file_id": fid, "name": safe_name, "asset_id": asset_id, "stage": stage,
+        "size": len(content), "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "path": saved_path, "uploader": user.get("username", ""),
+    }
+    meta = load_attachments()
+    meta.append(rec)
+    save_attachments(meta)
+    add_log(user.get("username", ""), "附件上传", f"{asset_id}/{stage} {safe_name}")
+    return {"success": True, "file_id": fid, "name": safe_name, "size": len(content),
+            "url": f"/lifecycle/attachment/{fid}"}
+
+
+@app.get("/lifecycle/attachments")
+def list_lifecycle_attachments(asset_id: str = "", stage: str = "", authorization: Optional[str] = Header(None)):
+    get_current_user(authorization)
+    items = load_attachments()
+    if asset_id:
+        items = [a for a in items if a.get("asset_id") == asset_id]
+    if stage:
+        items = [a for a in items if a.get("stage") == stage]
+    items.sort(key=lambda a: a.get("created_at", ""), reverse=True)
+    return {"attachments": [{k: a.get(k) for k in ("file_id", "name", "asset_id", "stage", "size", "created_at")}
+                            for a in items]}
+
+
+@app.get("/lifecycle/attachment/{file_id}")
+def download_lifecycle_attachment(file_id: str, authorization: Optional[str] = Header(None)):
+    get_current_user(authorization)
+    rec = next((a for a in load_attachments() if a.get("file_id") == file_id), None)
+    if not rec or not os.path.exists(rec.get("path", "")):
+        raise HTTPException(status_code=404, detail="附件不存在")
+    return FileResponse(rec["path"], filename=rec["name"], media_type="application/octet-stream")
+
+
+@app.delete("/lifecycle/attachment/{file_id}")
+def delete_lifecycle_attachment(file_id: str, authorization: Optional[str] = Header(None)):
+    user = get_current_user(authorization)
+    require_role(user, WRITE_ROLES)
+    meta = load_attachments()
+    rec = next((a for a in meta if a.get("file_id") == file_id), None)
+    if not rec:
+        raise HTTPException(status_code=404, detail="附件不存在")
+    try:
+        if os.path.exists(rec.get("path", "")):
+            os.remove(rec["path"])
+    except Exception:
+        pass
+    meta = [a for a in meta if a.get("file_id") != file_id]
+    save_attachments(meta)
+    add_log(user.get("username", ""), "附件删除", rec.get("name", ""))
+    return {"success": True, "message": "附件已删除"}
 
 
 # --- 资产盘点 ---
@@ -2034,7 +2194,9 @@ def push_all_alerts(authorization: Optional[str] = Header(None)):
             and not cfg.get("email", {}).get("enabled", False):
         raise HTTPException(status_code=400, detail="请先在推送配置中启用至少一个通道")
     open_alerts = [a for a in analysis_results.get("alert_list", [])
-                   if a.get("status") != "已处理" and a.get("level") in cfg.get("levels", [])]
+                   # source == "mock" 是「重新分析」生成的演示数据，绝不能真实推到微信/邮箱
+                   if a.get("status") != "已处理" and a.get("level") in cfg.get("levels", [])
+                   and a.get("source") != "mock"]
     if not open_alerts:
         return {"success": True, "sent": 0, "failed": 0, "message": "没有符合推送条件的未处理预警", "records": load_push_records()[:200]}
     total_sent = total_failed = 0
@@ -3166,7 +3328,9 @@ AGENT_SYSTEM_PROMPT = """你是「城市管网资产数字化台账系统」的 
 
 def agent_system_context() -> str:
     ov = analysis_results.get("asset_overview", {})
-    alerts = analysis_results.get("alert_list", [])
+    # 排除 source=mock 的演示预警：「重新分析」会生成 15 条随机模拟预警，若不剔除，
+    # Agent 会把它们当作真实情况念给用户（"当前有 N 条紧急预警"），与看板对不上。
+    alerts = [a for a in analysis_results.get("alert_list", []) if a.get("source") != "mock"]
     orders = load_workorders()
     unhandled = [a for a in alerts if a.get("status") == "未处理"]
     urgent = [a for a in unhandled if a.get("level") == "紧急"]
@@ -3998,7 +4162,21 @@ def _sync_sensor_alerts(readings: list):
         level = "紧急" if rd["status"] == "fault" else "重要"
         if sid in by_sensor:
             ex = by_sensor[sid]
-            ex["status"] = "未处理"
+            # 预警状态机只允许**向前**推进：未处理 → 处理中 → 已处理。
+            # 原实现无条件 ex["status"] = "未处理"，会把运维已认领的"处理中"打回未处理，
+            # 于是 /alerts 未读数永远降不下来、工单闭环与预警状态脱节
+            #（演示时"闭环了但预警还是未处理"）。
+            # 唯一允许的"回退"是已处理之后再次告警——那是新一次故障，必须留痕，不能静默重置。
+            cur = ex.get("status") or "未处理"
+            if cur == "已处理":
+                ex.setdefault("history", []).append({
+                    "time": rd.get("timestamp", ""),
+                    "action": "预警重新打开（传感器再次告警）",
+                    "by": "sensor_sim", "note": rd.get("alert_desc", ""),
+                })
+                ex["reopen_count"] = int(ex.get("reopen_count") or 0) + 1
+                cur = "未处理"
+            ex["status"] = cur
             ex["level"] = level
             ex["alert_type"] = f"{rd['alert_desc']}·传感器"
             ex["description"] = f"传感器 {sid} 告警：{rd['alert_desc']}（{json.dumps(rd['metrics'], ensure_ascii=False)}）"
@@ -4048,12 +4226,17 @@ def _sensor_sim_loop():
             try:
                 _sensor_tick()
                 sim_steps += 1
-                # 每 20 帧跑一次预测扫描：命中高风险 → 自动生成/更新预测预警（进入预警管理，可推送）
-                if sim_steps % 20 == 0:
+                # 扫描节拍必须 <= horizon。原来固定每 20 帧扫一次，而前向窗口 horizon=12：
+                # 每轮约 40% 的时间段没有任何预测覆盖，落在那段的异常既不计 hit 也不计 miss，
+                # "漏报率"看起来比真实情况好。节拍改为读模型 meta 的 config.scan_every_frames
+                # （默认 5），按帧触发（而非按时间）以保持与 horizon 的固定比例。
+                if sim_steps % _scan_every_frames() == 0:
                     try:
                         _prediction_scan()
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        # 不能吞：扫描异常时台账不加记录、看板只会显示"没有预警"，与"确实没风险"
+                        # 无法区分。写进全局状态位，由 /predict/dashboard 暴露。
+                        _record_scan(ok=False, error=f"{type(e).__name__}: {e}")
             except Exception:
                 pass
             time.sleep(float(sensor_sim_state["interval_sec"]))
@@ -4091,19 +4274,86 @@ def kb_search(query: str, top_k: int = 3) -> list:
 
 _predictive_bundle = None
 _predictive_loaded = False
+_predictive_load_error = None      # 最近一次加载失败原因（暴露到 /predict/dashboard）
+_predictive_load_ts = 0.0          # 上次尝试加载的时间，用于失败后的重试冷却
+_PREDICT_LOAD_RETRY_SEC = 10.0     # 加载失败后至少隔这么久再试，避免每帧都撞磁盘
 
 
-def get_predictive_bundle():
-    """加载训练好的预测模型；未训练/不可用时返回 None（调用方降级）。"""
-    global _predictive_bundle, _predictive_loaded
-    if not _predictive_loaded:
+def get_predictive_bundle(force_reload: bool = False):
+    """加载训练好的预测模型；未训练/不可用时返回 None（调用方降级）。
+
+    **只有加载成功才置位 _predictive_loaded**。原实现先置位再 load，且加载异常被 except
+    吞掉、标志也不复位——某一次加载失败之后，后续每次调用都在函数开头静默 return，
+    把模型放回磁盘也不会恢复，现象是"模型明明在、界面就是没预测"。
+    现在失败时保持未加载状态（过冷却期后自动重试，模型放回来自动恢复），
+    并把失败原因记进 _predictive_load_error，由 /predict/dashboard 暴露。
+    """
+    global _predictive_bundle, _predictive_loaded, _predictive_load_error, _predictive_load_ts
+    if force_reload:
+        _predictive_bundle, _predictive_loaded = None, False
+        _predictive_load_error, _predictive_load_ts = None, 0.0
+    if _predictive_loaded:
+        return _predictive_bundle
+    now = time.time()
+    if _predictive_load_ts and (now - _predictive_load_ts) < _PREDICT_LOAD_RETRY_SEC:
+        return None
+    _predictive_load_ts = now
+    try:
+        from predictive_models import PredictiveBundle
+        _predictive_bundle = PredictiveBundle.load(PREDICT_MODELS_DIR)
         _predictive_loaded = True
-        try:
-            from predictive_models import PredictiveBundle
-            _predictive_bundle = PredictiveBundle.load(PREDICT_MODELS_DIR)
-        except Exception:
-            _predictive_bundle = None
+        _predictive_load_error = None
+    except Exception as e:
+        _predictive_bundle = None
+        _predictive_loaded = False
+        _predictive_load_error = f"{type(e).__name__}: {e}"
     return _predictive_bundle
+
+
+# 扫描运行状态。扫描频率决定最长的"漏检窗口"，而扫描失败时台账不加记录、看板只会显示
+# "没有预警"，与"确实没风险"无法区分。这些状态位由 /predict/dashboard 暴露出去。
+_scan_state = {
+    "runs": 0, "failures": 0, "last_run_at": None, "last_ok": None,
+    "last_error": None, "last_duration_ms": None, "last_high_risk": 0,
+    "every_frames": None, "skipped_no_model": 0,
+}
+
+
+def _scan_every_frames() -> int:
+    """扫描节拍（帧）。优先取模型 meta 的 config.scan_every_frames，并强制 <= horizon。
+
+    节拍 > horizon 就意味着存在"没有任何预测覆盖"的时间段（20 帧 vs horizon 12 → 约 40%），
+    落在那段的异常既不计命中也不计漏报，漏报率会被系统性低估。所以这里做硬上限。
+    """
+    try:
+        bundle = get_predictive_bundle()
+        cfg = getattr(bundle, "config", None) or {}
+        n = int(cfg.get("scan_every_frames") or 5)
+        horizon = int(getattr(bundle, "horizon", 12) or 12)
+        n = max(1, min(n, horizon))
+        _scan_state["every_frames"] = n
+        return n
+    except Exception:
+        _scan_state["every_frames"] = 5
+        return 5
+
+
+def _record_scan(ok: bool, error: str = None, duration_ms: float = None,
+                 high_risk: int = None, skipped_no_model: bool = False):
+    """记录一次扫描的结果/耗时/异常。只做单赋值，用于可观测性，不作为业务依据。"""
+    _scan_state["last_run_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    _scan_state["last_ok"] = bool(ok)
+    _scan_state["last_error"] = error
+    if ok:
+        _scan_state["runs"] = int(_scan_state["runs"]) + 1
+    else:
+        _scan_state["failures"] = int(_scan_state["failures"]) + 1
+    if duration_ms is not None:
+        _scan_state["last_duration_ms"] = round(float(duration_ms), 1)
+    if high_risk is not None:
+        _scan_state["last_high_risk"] = int(high_risk)
+    if skipped_no_model:
+        _scan_state["skipped_no_model"] = int(_scan_state["skipped_no_model"]) + 1
 
 
 def _sensor_by_asset_or_sid(target: str):
@@ -4228,6 +4478,17 @@ _auto_workorder_at = {}
 
 def load_closedloop_config() -> dict:
     cfg = dict(CLOSEDLOOP_DEFAULT)
+    # 建单线优先取模型 meta 的 config（训练端 predictive_models.DEFAULT_CONFIG.workorder_min_score），
+    # 让"判正线 / 风险分档 / 自动建单线"都来自同一份配置，而不是三处各写一个数。
+    # 磁盘上 closedloop_config.json 里显式写过的值仍然优先（人工调参不被覆盖）。
+    try:
+        bundle = get_predictive_bundle()
+        meta_cfg = getattr(bundle, "config", None) or {}
+        if meta_cfg.get("workorder_min_score") is not None:
+            cfg["min_risk_for_workorder"] = float(meta_cfg["workorder_min_score"])
+            cfg["_min_risk_source"] = "model_meta"
+    except Exception:
+        pass
     if os.path.exists(CLOSEDLOOP_FILE):
         try:
             with open(CLOSEDLOOP_FILE, "r", encoding="utf-8") as f:
@@ -4303,9 +4564,13 @@ def _auto_workorder_from_prediction(sensor: dict, pred: dict, alert_id: str, cfg
 
 def _prediction_scan():
     """闭环：台账评估 → 预测记录（模型 + 规则基线）→ 生成预警 → 自动建单 / 可选自动推送。"""
+    _t0 = time.time()
     bundle = get_predictive_bundle()
     if bundle is None:
+        # 模型不可用 ≠ 没有风险。与"扫过且无风险"必须区分（原因见 _predictive_load_error）。
+        _record_scan(ok=True, duration_ms=(time.time() - _t0) * 1000, skipped_no_model=True)
         return
+    scan_errors = []
     horizon = int(getattr(bundle, "horizon", 12) or 12)
     tick = int(sensor_sim_state.get("tick", 0))
     sps = _seconds_per_step()
@@ -4314,13 +4579,14 @@ def _prediction_scan():
     # 1) 先给上一批到期的预测打真实标签（命中率/误报率的数据来源）
     try:
         predict_ledger.evaluate(sensor_history, seconds_per_step=sps)
-    except Exception:
-        pass
+    except Exception as e:
+        scan_errors.append(f"ledger.evaluate: {type(e).__name__}: {e}")
 
     alerts = analysis_results.get("alert_list", [])
     by_key = {a.get("sensor_id"): a for a in alerts if a.get("source") == "prediction"}
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     horizon_text = agent_brain.horizon_text(horizon, sps)
+    n_high = 0
 
     for s in load_sensors():
         sid = s["sensor_id"]
@@ -4337,11 +4603,12 @@ def _prediction_scan():
             rule_hit = (latest.get("status") or "normal") != "normal"
             predict_ledger.record_rule_baseline(s, rule_hit, 100.0 if rule_hit else 0.0,
                                                 tick, len(hist), horizon)
-        except Exception:
-            pass
+        except Exception as e:
+            scan_errors.append(f"ledger.record({sid}): {type(e).__name__}: {e}")
 
         if p.get("predicted_status") not in ("critical", "warning"):
             continue
+        n_high += 1
 
         # 3) 生成 / 更新预测预警
         level = "紧急" if p["predicted_status"] == "critical" else "重要"
@@ -4353,7 +4620,14 @@ def _prediction_scan():
                 f"关键因子: {factors_cn}（{factors_raw}）")
         if sid in by_key:
             a = by_key[sid]
-            a.update({"status": a.get("status") if a.get("status") == "处理中" else "未处理",
+            # 预警状态机只允许**向前**推进：未处理 → 处理中 → 已处理。
+            # 原实现是 `a.get("status") if a.get("status") == "处理中" else "未处理"`，
+            # 会把工单验收后的"已处理"无条件打回"未处理"，于是 /alerts 未读数永远降不下来、
+            # 工单闭环与预警状态脱节（演示时"闭环了但预警还是未处理"）。回退必须走显式接口。
+            cur = a.get("status") or "未处理"
+            if cur not in ("处理中", "已处理"):
+                cur = "未处理"
+            a.update({"status": cur,
                       "level": level, "description": desc, "create_time": now_str,
                       "asset_id": s.get("asset_id"), "risk_score": p.get("risk_score")})
             if a.get("push_status") != "已推送":
@@ -4377,8 +4651,8 @@ def _prediction_scan():
         try:
             if cfg.get("auto_workorder") and float(p.get("risk_score") or 0) >= float(cfg.get("min_risk_for_workorder") or 0):
                 _auto_workorder_from_prediction(s, p, alert_id, cfg)
-        except Exception:
-            pass
+        except Exception as e:
+            scan_errors.append(f"auto_workorder({sid}): {type(e).__name__}: {e}")
 
         # 5) 自动推送（真实网关，默认关闭）
         try:
@@ -4387,14 +4661,18 @@ def _prediction_scan():
                                     channel_filter=str(cfg.get("push_channel") or ""))
                 add_log("system", "预测闭环推送",
                         f"{alert_id} 自动推送：成功 {res['sent']} 条，失败 {res['failed']} 条")
-        except Exception:
-            pass
+        except Exception as e:
+            scan_errors.append(f"auto_push({sid}): {type(e).__name__}: {e}")
 
     analysis_results["alert_list"] = alerts[-120:]
     try:
         predict_ledger.flush()
-    except Exception:
-        pass
+    except Exception as e:
+        scan_errors.append(f"ledger.flush: {type(e).__name__}: {e}")
+    # 一次扫描的成败/耗时/高风险数落进状态位，由 /predict/dashboard 暴露：
+    # 看板必须能区分"扫过了、没风险"和"压根没扫成"
+    _record_scan(ok=not scan_errors, error="; ".join(scan_errors[:5]) if scan_errors else None,
+                 duration_ms=(time.time() - _t0) * 1000, high_risk=n_high)
 
 
 class SensorData(BaseModel):
@@ -4675,6 +4953,12 @@ def predict_dashboard_endpoint(authorization: Optional[str] = Header(None)):
         "recent": predict_ledger.recent_records(limit=40),
         "closedloop": load_closedloop_config(),
         "auto_workorders": len([o for o in load_workorders() if o.get("source") == "prediction"]),
+        # 扫描状态 + 模型加载失败原因：没有这两项，看板无法区分"扫过了、确实没风险"与
+        # "扫描一直抛异常 / 模型根本没加载上"——两者在界面上都只表现为"没有预警"。
+        "scan": dict(_scan_state),
+        "model_load": {"loaded": bool(_predictive_loaded),
+                       "last_error": _predictive_load_error,
+                       "retry_cooldown_sec": _PREDICT_LOAD_RETRY_SEC},
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
 
@@ -4701,6 +4985,13 @@ def predict_feedback(alert_id: str, request: PredictFeedbackRequest,
                                      user=user.get("username", ""),
                                      extra={"alert_type": (alert or {}).get("alert_type", ""),
                                             "level": (alert or {}).get("level", "")})
+    # add_feedback 现在会明确拒绝"编号/批次与最新未评估记录不符"的反馈——这是为了防止
+    # 一次点击追溯改写该传感器历史上全部已评估记录。拒绝必须让前端看到：原实现无条件
+    # return success=True，而前端只看 toast，等于把"没写进去"当成"反馈成功"。
+    if isinstance(fb, dict) and fb.get("success") is False:
+        reason = fb.get("reason") or fb.get("error") or fb.get("message") or "反馈未能写入台账"
+        add_log(user.get("username", ""), "预测反馈", f"{alert_id} → {outcome}（被拒绝：{reason}）")
+        raise HTTPException(status_code=409, detail=reason)
     add_log(user.get("username", ""), "预测反馈", f"{alert_id} → {outcome}")
     return {"success": True, "feedback": fb,
             "labeled_samples": len(predict_ledger.feedback_training_rows())}
@@ -4714,10 +5005,10 @@ _retrain_state = {"running": False, "started_at": "", "finished_at": "",
 
 def reload_predictive_bundle():
     """丢弃已缓存的模型，下次调用重新从 models/ 读取（重训后热生效）。"""
-    global _predictive_bundle, _predictive_loaded
-    _predictive_bundle, _predictive_loaded = None, False
     prediction_summary(force=True)
-    return get_predictive_bundle()
+    # 用 force_reload：它会同时复位"加载失败"标志与重试冷却。否则上一次加载失败后的
+    # 冷却期内这里会直接拿到 None，刚重训出来的新模型要等冷却结束才生效。
+    return get_predictive_bundle(force_reload=True)
 
 
 def _retrain_job(window: int, horizon: int):

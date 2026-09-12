@@ -60,6 +60,39 @@ METRICS = ["pressure", "flow", "temperature", "gas_concentration", "level", "vib
 # 学成「一律预测 ~cap」，于是大屏出现「异常概率 99.9% 但 RUL 75 步」这种自相矛盾的输出。
 RUL_CAP_FACTOR = 2
 
+# 阈值 / 分档 / 建单线 / 权重的**唯一定义处**。
+# 这些常量原来在三个文件里各写了一遍（本文件的 RUL 投影硬编码 0.5、main.py 的风险档
+# 硬编码 80/60/40、自动建单线硬编码 60 分与兜底 0.7、agent_brain 又各写一套），于是同一张
+# 预警卡片会自相矛盾（"12 步内必然异常"与"还要 75 步"并存），"危急"档几乎不可达导致紧急工单
+# 永远升不上去。现在只在这里定义一份：训练时写进 predictive_meta.json，推理端、台账、Agent
+# 与前端一律读 meta，代码不再各写死一份。
+DEFAULT_CONFIG = {
+    # 兜底判正线：只在模型 meta 里没有阈值时使用（模型太老或阈值扫描失败）
+    "risk_threshold": 0.7,
+    # critical 线 = warn + (1 - warn) * crit_midpoint
+    "crit_midpoint": 0.5,
+    # risk_score = (w_prob * prob + w_anomaly * anomaly_score + w_rul * rul项) * 100
+    "risk_score_weights": {"prob": 0.5, "anomaly": 0.3, "rul": 0.2},
+    # 风险分档（用于台账/看板配色与分级），键名与前端一致
+    "risk_levels": {"critical": 80, "warning": 60, "attention": 40},
+    # 风险分达到该线才自动建工单
+    "workorder_min_score": 60,
+    # RUL 回归目标的右删失上限倍数，必须与 risk_score 的截断点一致
+    "rul_cap_factor": RUL_CAP_FACTOR,
+    # 扫描节拍（帧）。必须 <= horizon：horizon=12 时每 20 帧扫一次意味着每轮约 40% 的时间段
+    # 没有任何预测覆盖，落在那段的异常既不计 hit 也不计 miss，漏报率看起来比真实情况好。
+    "scan_every_frames": 5,
+}
+
+
+def get_config(overrides=None):
+    """返回一份配置副本；overrides 里非 None 的键覆盖默认值（供读 meta / 环境变量用）。"""
+    cfg = {k: (dict(v) if isinstance(v, dict) else v) for k, v in DEFAULT_CONFIG.items()}
+    for k, v in (overrides or {}).items():
+        if v is not None and k in cfg:
+            cfg[k] = v
+    return cfg
+
 
 def readings_to_frame(readings):
     """读数列表 -> DataFrame（含指标列 + status + timestamp + sensor_id），按时间升序。"""
@@ -122,13 +155,30 @@ def build_features(df, window=15):
 
 
 def future_anomaly_labels(anomaly_series, horizon):
-    """label[i]=1 表示 i+1..i+horizon 步内将出现异常。"""
+    """label[i]=1 表示 i+1..i+horizon 步内将出现异常；-1 表示**未知**。
+
+    尾部 horizon 帧的未来窗口会被数据末尾截断。原实现把"看不全"的情况一律写成 0，
+    而每个传感器的测试集恰好是末尾 20%——120 帧时最后 12 帧（horizon）必然被标 0，
+    占测试集（≈21 帧）约 57%。测试集基准率因此被系统性压低，写进 meta 的判正阈值、
+    precision / recall / 命中率全部建立在这个截尾偏差上。
+
+    现在三态：
+      · 窗口内**确实观察到**异常           → 1（确定正，截断也算，因为已经看到了）
+      · 窗口完整且无异常                    → 0（确定负）
+      · 窗口被截断且可见区间内无异常        → -1（未知，训练/阈值扫描/评估三处都必须剔除）
+    """
     arr = anomaly_series.values
     n = len(arr)
-    out = np.zeros(n)
+    out = np.full(n, -1.0)
     for i in range(n):
-        lo, hi = i + 1, min(i + 1 + horizon, n)
-        out[i] = 1 if (lo < n and arr[lo:hi].any()) else 0
+        lo = i + 1
+        hi = min(lo + horizon, n)
+        seen = bool(arr[lo:hi].any()) if lo < n else False
+        if seen:
+            out[i] = 1.0
+        elif lo + horizon <= n:
+            out[i] = 0.0
+        # else: 窗口被截断且未见异常，保持 -1.0（未知）
     return pd.Series(out, index=anomaly_series.index)
 
 
@@ -151,7 +201,7 @@ def rul_targets(anomaly_series, cap=200):
     return pd.Series(out, index=anomaly_series.index)
 
 
-def consistent_rul(prob, rul, horizon):
+def consistent_rul(prob, rul, horizon, threshold=0.5):
     """把 RUL 预测投影到分类器的判定在逻辑上允许的区间，消除两个头互相打脸的输出。
 
     model_b 的正类定义就是「未来 horizon 步内出现异常」，rul_targets 数的是同一
@@ -166,11 +216,17 @@ def consistent_rul(prob, rul, horizon):
     可用——后者会让人无法判断该信哪个。
 
     标量与数组皆可，返回同形状结果。
+
+    threshold 必须传**当前生效的判正线**（bundle.threshold），默认 0.5 只是兼容旧调用的
+    兜底。原实现把边界硬编码成 0.5，而线上判正线实测是 0.80，于是 prob ∈ [0.5, 0.8) 的点位
+    得到 predicted_status="normal" 却同时输出 rul < horizon，前端渲染出"正常 + 约 11 步内
+    可能异常"——自相矛盾只是从"两个头之间"搬到了"状态与 RUL 之间"。
     """
     p = np.asarray(prob, dtype=float)
     r = np.asarray(rul, dtype=float)
     h = float(max(horizon, 1))
-    out = np.where(p >= 0.5, np.minimum(r, h - 1.0), np.maximum(r, h))
+    thr = float(threshold) if threshold is not None else 0.5
+    out = np.where(p >= thr, np.minimum(r, h - 1.0), np.maximum(r, h))
     return float(out) if np.ndim(prob) == 0 and np.ndim(rul) == 0 else out
 
 
@@ -197,7 +253,8 @@ class PredictiveBundle:
     """打包训练好的 A/B/RUL 模型、特征列、window/horizon，支持保存/加载/在线预测。"""
 
     def __init__(self, model_a=None, model_b=None, model_rul=None, features=None,
-                 window=15, horizon=12, y_mean=None, threshold=None):
+                 window=15, horizon=12, y_mean=None, threshold=None,
+                 threshold_source=None, config=None, a_score_mean=None, a_score_std=None):
         self.model_a = model_a
         self.model_b = model_b
         self.model_rul = model_rul
@@ -205,9 +262,20 @@ class PredictiveBundle:
         self.window = window
         self.horizon = horizon
         self.y_mean = y_mean
-        # 判正阈值：测试集上 F1 最优的那个点，而不是拍脑袋的常数。为 None 时
-        # online_predict 退回 risk_threshold 默认值（模型太老、没存过阈值的情形）。
+        # A 头 score_samples 在**训练集**上的均值/标准差。IsolationForest 的 score_samples
+        # 典型区间只有约 (-0.8, -0.3)，直接 sigmoid 会把它压成 0.31~0.43 的近似常数，
+        # risk_score 里 0.3 的权重形同虚设。按训练分布标准化后再 sigmoid，方向正确且量纲稳定。
+        self.a_score_mean = a_score_mean
+        self.a_score_std = a_score_std
+        # 判正阈值：**在训练段内部切出的验证集**上 F1 最优的那个点，而不是拍脑袋的常数，
+        # 更不是测试集上扫出来的（那会让报告的 precision/recall/F1 全部带乐观偏差）。
+        # 为 None 时表示没有可信阈值，online_predict 退回 config 里的 risk_threshold 默认值。
         self.threshold = threshold
+        # 阈值来源：validation_scan / train_only_fallback / none。只有光看阈值数字分不清
+        # 它是扫出来的还是兜底的，落进 meta 后线上也能核对。
+        self.threshold_source = threshold_source
+        # 阈值/分档/建单线/权重/扫描节拍的统一配置（见 DEFAULT_CONFIG）
+        self.config = get_config(config)
 
     def save(self, out_dir):
         if joblib is None:
@@ -215,6 +283,13 @@ class PredictiveBundle:
         os.makedirs(out_dir, exist_ok=True)
         meta = {"features": self.features, "window": self.window, "horizon": self.horizon,
                 "y_mean": self.y_mean, "threshold": self.threshold,
+                # 阈值来源与统一配置一起落盘：main.py / agent_brain / 前端都读这里，
+                # 不再各自硬编码（原来 RUL 投影 0.5、风险档 80/60/40、建单线 60 分各写一份）
+                "threshold_source": self.threshold_source,
+                "config": self.config,
+                "rul_cap_factor": self.config.get("rul_cap_factor", RUL_CAP_FACTOR),
+                "a_score_mean": self.a_score_mean,
+                "a_score_std": self.a_score_std,
                 "engine": {"lightgbm": HAVE_LGB, "xgboost": HAVE_XGB, "shap": HAVE_SHAP}}
         with open(os.path.join(out_dir, "predictive_meta.json"), "w", encoding="utf-8") as f:
             json.dump(meta, f, ensure_ascii=False, indent=2)
@@ -227,21 +302,34 @@ class PredictiveBundle:
             meta = json.load(f)
         data = joblib.load(os.path.join(out_dir, "predictive_models.joblib"))
         threshold = meta.get("threshold")
+        threshold_source = meta.get("threshold_source")
         if threshold is None:
             # meta 里没有就是阈值上线前存的模型。best_f1_threshold 一直有写进
             # 同目录的 predictive_report.json，捞回来即可，不必逼人重训一遍。
+            # 注意：那种旧阈值是在测试集上扫的，来源标记为 legacy_test_scan，口径偏乐观。
             try:
                 with open(os.path.join(out_dir, "predictive_report.json"), "r", encoding="utf-8") as f:
                     threshold = json.load(f).get("best_f1_threshold")
+                    if threshold is not None:
+                        threshold_source = "legacy_test_scan"
             except Exception:
                 threshold = None
+        # 旧模型 meta 里没有 config：用默认值补齐，保证新代码能直接跑旧 checkpoint。
+        cfg = get_config(meta.get("config"))
+        if meta.get("rul_cap_factor") is not None:
+            cfg["rul_cap_factor"] = meta["rul_cap_factor"]
         return cls(model_a=data["model_a"], model_b=data["model_b"], model_rul=data["model_rul"],
                    features=meta["features"], window=meta["window"], horizon=meta["horizon"],
-                   y_mean=meta.get("y_mean"), threshold=threshold)
+                   y_mean=meta.get("y_mean"), threshold=threshold,
+                   threshold_source=threshold_source, config=cfg,
+                   a_score_mean=meta.get("a_score_mean"), a_score_std=meta.get("a_score_std"))
 
 
 def _build_training_frames(df, window, horizon):
-    """按 sensor_id 分组做特征工程与打标，返回 (feat, y_future, y_rul, is_test)。
+    """按 sensor_id 分组做特征工程与打标，返回 (feat, y_future, y_rul, is_test, gids)。
+
+    gids 是逐行的传感器标识，供 train_bundle 按传感器切验证集用（阈值只能在验证集上扫，
+    且不能跨传感器混切）。y_future 为三态：1 确定正 / 0 确定负 / -1 未知（尾部窗口被截断）。
 
     分组是必须的，不能图省事直接对 pooled df 做 rolling：同一 tick 里 100 个传感器的
     timestamp 完全相同，排序后彼此相邻，rolling(15) 算出来的是「同一时刻 15 个不同
@@ -253,7 +341,7 @@ def _build_training_frames(df, window, horizon):
     else:
         groups = [df]
 
-    feats, yfs, yrs, tests = [], [], [], []
+    feats, yfs, yrs, tests, gids = [], [], [], [], []
     for g in groups:
         g = g.sort_values("timestamp", kind="mergesort").reset_index(drop=True)
         f = build_features(g, window)
@@ -268,27 +356,46 @@ def _build_training_frames(df, window, horizon):
         t = np.zeros(len(f), dtype=bool)
         t[int(len(f) * 0.8):] = True
         tests.append(t)
+        # 逐行记录所属传感器：阈值必须在**按传感器分组**的验证集上扫，跨传感器的行绝不能
+        # 混进同一个 split——同一 tick 的行没有因果先后，混着切会让"未来"泄漏进特征。
+        sid = str(g["sensor_id"].iloc[0]) if ("sensor_id" in g.columns and len(g)) else ""
+        gids.append(np.full(len(f), sid, dtype=object))
 
     if not feats:
-        return pd.DataFrame(), np.array([]), np.array([]), np.array([], dtype=bool)
-    # 各管网类型的指标集不同，分组 dropna 后列不一致；concat 取并集，缺口留 NaN 由下游填 0
+        return (pd.DataFrame(), np.array([]), np.array([]), np.array([], dtype=bool),
+                np.array([], dtype=object))
+    # 各管网类型的指标集不同，分组 dropna 后列不一致；concat 取并集，缺口留 NaN，下游按
+    # 模型能力处理（树的三个引擎都支持 NaN 分裂，但 sklearn 的 IsolationForest 不支持，
+    # 所以 A 头单独喂一份填 0 的矩阵，见 train_bundle）
     return (pd.concat(feats, ignore_index=True).fillna(0),
-            np.concatenate(yfs), np.concatenate(yrs), np.concatenate(tests))
+            np.concatenate(yfs), np.concatenate(yrs), np.concatenate(tests),
+            np.concatenate(gids))
 
 
 def train_bundle(df, window=15, horizon=12, anomaly_contamination="auto"):
     """训练 A/B/RUL，返回 (bundle, report)。df 为 readings_to_frame 输出的时序 DataFrame（可 pooled）。"""
     if len(df) < 30:
         raise ValueError("样本太少（需累积至少 window 长度的传感器历史），请先采集数据再训练")
-    feat, y_future, y_rul, is_test = _build_training_frames(df, window, horizon)
+    feat, y_future, y_rul, is_test, gids = _build_training_frames(df, window, horizon)
     if feat.empty or len(feat) < 30:
         raise ValueError("特征样本太少（需累积至少 window 长度的传感器历史），请先采集数据再训练")
     feature_cols = list(feat.columns)
     X = feat[feature_cols].values
+    cfg = get_config()
+    rul_cap = horizon * int(cfg["rul_cap_factor"])
+
+    errors = []
+
+    # 标签里有 -1（尾部窗口被截断且未见异常，见 future_anomaly_labels）。这些帧必须从
+    # 训练、阈值扫描、评估三处**全部剔除**：原实现把它们一律写成 0，而测试集恰是每个
+    # 传感器的末尾 20%，于是测试集基准率被系统性压低，阈值与 precision/recall 全带偏差。
+    known = y_future >= 0
+    n_unknown = int((~known).sum())
 
     reading_anomaly_rate = float((df["status"] != "normal").mean()) if "status" in df.columns else 0.0
-    pos_all = float(np.mean(y_future))
-    if len(set(y_future.tolist())) < 2:
+    y_known = y_future[known]
+    pos_all = float(np.mean(y_known == 1)) if len(y_known) else 0.0
+    if len(set(y_known.tolist())) < 2:
         # 早失败：单一类别会让 sklearn 的 predict_proba 只返回一列，后面 [:, 1] 直接 IndexError，
         # 报错信息完全看不出是数据问题。重训前若跑的是纯 fault 场景（或还没产生过异常）就会这样。
         raise ValueError(
@@ -297,24 +404,51 @@ def train_bundle(df, window=15, horizon=12, anomaly_contamination="auto"):
             f"若接近 100%：异常太密集，horizon={horizon} 会把几乎每一帧都判成「未来会异常」，"
             f"请改用 mixed 场景（异常应为稀有事件）")
 
-    tr, te = ~is_test, is_test
-    X_tr, X_te = X[tr], X[te]
-    yf_tr, yf_te = y_future[tr], y_future[te]
-    yr_tr = y_rul[tr]
-    rul_cap = horizon * RUL_CAP_FACTOR
+    tr_all, te_all = ~is_test, is_test
+    tr = tr_all & known          # 未知标签不进训练
+    te = te_all & known          # 未知标签不进评估
 
+    # 阈值必须在**训练段内部、按传感器切出的验证集**上扫，测试集只用于最终评估一次。
+    # 原实现直接拿测试集扫 F1 并把该点当成模型成绩上报，报告的 precision/recall/F1 全部带
+    # 乐观偏差、换个测试集最优阈值还会漂移。切法：每个传感器的训练段按时间取尾 25% 作验证，
+    # 既保住「用过去预测未来」的时序语义，又不跨传感器混切（同一 tick 的行没有因果先后）。
+    val = np.zeros(len(y_future), dtype=bool)
+    if len(gids):
+        for g in pd.unique(gids[tr]):
+            idx = np.where(tr & (gids == g))[0]
+            if len(idx) >= 20:
+                val[idx[int(len(idx) * 0.75):]] = True
+    fit = tr & ~val
+    threshold_source = "validation_scan"
+    if int(fit.sum()) < 30 or int(val.sum()) < 20:
+        # 样本太薄（传感器太少或历史太短）：切不出可信验证集。此时**宁可不要阈值**
+        # （推理端走 config 的兜底线），也绝不回到"在测试集上扫"的老路。
+        fit, val = tr, np.zeros(len(y_future), dtype=bool)
+        threshold_source = "train_only_no_threshold"
+
+    X_fit = X[fit]
     # IsolationForest 虽是无监督的，也只能见训练段：它的 anomaly_score 直接占 risk_score
     # 的 0.3 权重，而下面又要拿测试段评估，用全量拟合等于让被评估样本参与自己的评分。
+    # 另外 sklearn 的 IsolationForest **不接受 NaN**（三个引擎里只有它不是树模型的不完整
+    # 数据实现），所以 A 头单独喂一份填 0 的矩阵；填 0 对 z 类特征是中性值（= 自身历史均值）。
     model_a = IsolationForest(n_estimators=200, contamination=anomaly_contamination, random_state=42)
-    model_a.fit(X_tr)
+    model_a.fit(np.nan_to_num(X_fit, nan=0.0))
 
     model_b = make_classifier()
+    # 三个引擎的概率口径必须一致：原来只有 LightGBM 设了 class_weight="balanced"，
+    # XGBoost / HistGB 没有，于是换引擎后扫出的阈值不可迁移、prob 的含义随引擎漂移。
     try:
         if HAVE_LGB:
             model_b.set_params(class_weight="balanced")
-    except Exception:
-        pass
-    model_b.fit(X_tr, yf_tr)
+        elif HAVE_XGB:
+            pos_fit = float(np.mean(y_future[fit] == 1))
+            if 0 < pos_fit < 1:
+                model_b.set_params(scale_pos_weight=(1 - pos_fit) / pos_fit)
+        else:
+            model_b.set_params(class_weight="balanced")
+    except Exception as e:
+        errors.append(f"class_weight: {type(e).__name__}: {e}")
+    model_b.fit(X_fit, y_future[fit])
 
     # RUL 目标是右删失的：rul == rul_cap 只表示「至少还有 cap 步」，不是「恰好 cap 步」。
     # 把删失值当真值拟合，回归器会被占绝对多数的 cap 拉平（实测 cap=horizon*10 时 88% 的
@@ -323,25 +457,37 @@ def train_bundle(df, window=15, horizon=12, anomaly_contamination="auto"):
     # 实测对比（12000 帧 / 100 传感器 / horizon=12，矛盾 = prob≥0.5 却 rul≥horizon 的帧数）：
     #   丢弃前  矛盾 33/143，92% 的预测 ≥ 2*horizon（risk_score 的 RUL 项恒为 0，权重白白浪费）
     #   丢弃后  矛盾  1/143， 0% 的预测 ≥ 2*horizon
-    keep = yr_tr < rul_cap
+    yr_fit = y_rul[fit]
+    keep = yr_fit < rul_cap
     model_rul = make_regressor()
     if int(keep.sum()) >= 30:
-        model_rul.fit(X_tr[keep], yr_tr[keep])
+        model_rul.fit(X_fit[keep], yr_fit[keep])
     else:
         # 删失后所剩无几（异常极稀有的数据），退回全量拟合：宁可 RUL 偏大，
         # 也不能让它在这里抛异常拖垮整条在线预测链路
-        model_rul.fit(X_tr, yr_tr)
+        model_rul.fit(X_fit, yr_fit)
 
-    y_mean = float(np.mean(yr_tr[keep])) if int(keep.sum()) else float(np.mean(yr_tr))
+    y_mean = float(np.mean(yr_fit[keep])) if int(keep.sum()) else float(np.mean(yr_fit))
+    # A 头分数在训练集上的分布：推理端按它标准化，否则 0.3 的权重退化成近似常数
+    try:
+        a_scores_fit = model_a.score_samples(np.nan_to_num(X_fit, nan=0.0))
+        a_mean = float(np.mean(a_scores_fit))
+        a_std = float(np.std(a_scores_fit)) or 1.0
+    except Exception as e:
+        errors.append(f"a_score_stats: {type(e).__name__}: {e}")
+        a_mean, a_std = None, None
     bundle = PredictiveBundle(model_a=model_a, model_b=model_b, model_rul=model_rul,
                               features=feature_cols, window=window, horizon=horizon,
-                              y_mean=y_mean)
+                              y_mean=y_mean, config=cfg,
+                              a_score_mean=a_mean, a_score_std=a_std)
 
-    pos_te = float(np.mean(yf_te)) if len(yf_te) else 0.0
-    pos_tr = float(np.mean(yf_tr)) if len(yf_tr) else 0.0
+    pos_te = float(np.mean(y_future[te] == 1)) if int(te.sum()) else 0.0
+    pos_tr = float(np.mean(y_future[fit] == 1)) if int(fit.sum()) else 0.0
     report = {"window": window, "horizon": horizon, "n_samples": int(len(X)),
               "n_sensors": int(df["sensor_id"].nunique()) if "sensor_id" in df.columns else 1,
               "engine": {"lightgbm": HAVE_LGB, "xgboost": HAVE_XGB, "shap": HAVE_SHAP},
+              "config": cfg,
+              "threshold_source": threshold_source,
               # 基准率必须和指标一起看：avg_precision≈正样本率 就说明模型只是背了基准率。
               # 训练集与测试集基准率要并报：实测过一次「场景中途被切换」的数据（前 91 tick 跑
               # normal、后 29 tick 跑异常场景），按位置切分后测试集整段落在全异常区，
@@ -350,31 +496,92 @@ def train_bundle(df, window=15, horizon=12, anomaly_contamination="auto"):
                         "positive_rate": round(pos_all, 4),
                         "positive_rate_train": round(pos_tr, 4),
                         "positive_rate_test": round(pos_te, 4),
-                        "n_train": int(np.sum(tr)), "n_test": int(np.sum(te)),
-                        "n_positive": int(np.sum(y_future))}}
+                        "n_train": int(np.sum(fit)), "n_val": int(np.sum(val)),
+                        "n_test": int(np.sum(te)),
+                        "n_positive": int(np.sum(y_known == 1)),
+                        # 被截断而标为未知的帧数：读报告的人必须知道丢掉了多少标签，
+                        # 否则无法判断测试集基准率是怎么来的
+                        "label_truncated_frames": n_unknown}}
 
-    # B 模型评估
-    prob = model_b.predict_proba(X_te)[:, 1] if hasattr(model_b, "predict_proba") else None
-    if prob is not None and len(yf_te):
-        y_te = yf_te
+    # ---- B 模型：阈值只在验证集上扫；测试集只做最终评估一次 ----
+    prob_te, y_te = None, y_future[te]
+    if hasattr(model_b, "predict_proba"):
+        try:
+            prob_te = model_b.predict_proba(X[te])[:, 1]
+        except Exception as e:
+            errors.append(f"model_b.eval: {type(e).__name__}: {e}")
+    if prob_te is not None and len(y_te):
         if len(set(y_te.tolist())) > 1:
-            report["auc"] = round(float(roc_auc_score(y_te, prob)), 4)
-        report["avg_precision"] = round(float(average_precision_score(y_te, prob)), 4)
-        best_f1, best_t, bp, br = 0.0, 0.5, 0.0, 0.0
-        for t in np.arange(0.1, 0.91, 0.05):
-            pred = (prob >= t).astype(int)
-            f1 = f1_score(y_te, pred, zero_division=0)
-            if f1 > best_f1:
-                best_f1, best_t = f1, t
-                bp = precision_score(y_te, pred, zero_division=0)
-                br = recall_score(y_te, pred, zero_division=0)
-        report["best_f1_threshold"] = round(float(best_t), 2)
-        report["f1"] = round(float(best_f1), 4)
-        report["precision"] = round(float(bp), 4)
-        report["recall"] = round(float(br), 4)
-        # bundle 在上面就构造好了，阈值却要到这一段扫完才得出，只能事后补上。
-        # 扫描没跑（测试集只有单一类别）时留 None，推理端退回默认阈值。
-        bundle.threshold = round(float(best_t), 2)
+            report["auc"] = round(float(roc_auc_score(y_te, prob_te)), 4)
+        report["avg_precision"] = round(float(average_precision_score(y_te, prob_te)), 4)
+
+    best_t = None
+    if int(val.sum()) >= 20 and hasattr(model_b, "predict_proba"):
+        try:
+            prob_val = model_b.predict_proba(X[val])[:, 1]
+            y_val = y_future[val]
+            best_f1, cand, scan = 0.0, None, {}
+            for t in np.arange(0.1, 0.91, 0.05):
+                f1 = f1_score(y_val, (prob_val >= t).astype(int), zero_division=0)
+                scan[round(float(t), 2)] = round(float(f1), 4)
+                if f1 > best_f1:
+                    best_f1, cand = float(f1), round(float(t), 2)
+            # 只有真正扫到有效 F1 才写阈值。原实现用 `best_f1, best_t = 0.0, 0.5` 初始化，
+            # 测试集只有单一类别、或所有阈值 F1 都为 0 时，0.5 会被静默写进 meta；推理端
+            # 因为 meta 里"有阈值"就不再退回默认 0.7，判正线被悄悄从 0.8 放宽到 0.5，
+            # 预警量暴增而无人知晓。
+            if cand is not None and best_f1 > 0:
+                best_t = cand
+                report["val_f1"] = round(best_f1, 4)
+                report["val_threshold_scan"] = scan
+                near = [v for k, v in scan.items() if abs(k - best_t) <= 0.0501]
+                if near:
+                    # 稳健性：阈值 ±0.05 内 F1 的波动范围。波动很小说明这个阈值不敏感，
+                    # 成绩不是"碰巧挑到某个点"的结果。
+                    report["threshold_robustness"] = {
+                        "window": "±0.05", "f1_min": round(min(near), 4),
+                        "f1_max": round(max(near), 4)}
+            else:
+                threshold_source = "validation_scan_failed"
+        except Exception as e:
+            errors.append(f"threshold_scan: {type(e).__name__}: {e}")
+            threshold_source = "validation_scan_failed"
+
+    bundle.threshold = best_t
+    bundle.threshold_source = threshold_source
+    report["threshold_source"] = threshold_source
+    report["best_f1_threshold"] = best_t
+
+    # 用验证集选出的阈值在**测试集**上评估一次——这才是可以对外报的数字
+    if prob_te is not None and best_t is not None and len(y_te):
+        pred_te = (prob_te >= best_t).astype(int)
+        report["test_f1"] = round(float(f1_score(y_te, pred_te, zero_division=0)), 4)
+        report["precision"] = round(float(precision_score(y_te, pred_te, zero_division=0)), 4)
+        report["recall"] = round(float(recall_score(y_te, pred_te, zero_division=0)), 4)
+        # 兼容旧字段名：原来的 f1 就是"在测试集上扫出的最优 F1"，现在它是在测试集上、
+        # 用**验证集选的**阈值算出来的，口径更严格
+        report["f1"] = report["test_f1"]
+
+    # ---- A 头（IsolationForest）单独评估 ----
+    # 原来 A 头从未被评估过，而它的 anomaly_score 直接占 risk_score 的 0.3 权重。sklearn 的
+    # score_samples 越**低**越异常（典型区间约 (-0.8, -0.3)），原实现写 sigmoid(raw) 方向是反的：
+    # 越正常的点分越高，等于给异常点减分。这里把 A 头分数分布与 AUC 打进报告，
+    # 判据是"正样本组 mean 应显著低于负样本组 mean"（因为 anomaly_score = sigmoid(-raw)）。
+    try:
+        if int(te.sum()):
+            ra = model_a.score_samples(np.nan_to_num(X[te], nan=0.0))
+            report["anomaly_head"] = {
+                "score_samples_p05": round(float(np.percentile(ra, 5)), 4),
+                "score_samples_p50": round(float(np.percentile(ra, 50)), 4),
+                "score_samples_p95": round(float(np.percentile(ra, 95)), 4),
+                "mean_positive": round(float(np.mean(ra[y_te == 1])), 4) if (y_te == 1).any() else None,
+                "mean_negative": round(float(np.mean(ra[y_te == 0])), 4) if (y_te == 0).any() else None,
+                # 取负号后算 AUC：>0.5 才说明"越异常分越低"这个方向成立
+                "auc_score_samples_negated": (round(float(roc_auc_score(y_te, -ra)), 4)
+                                              if len(set(y_te.tolist())) > 1 else None),
+            }
+    except Exception as e:
+        errors.append(f"anomaly_head_eval: {type(e).__name__}: {e}")
 
     # RUL 回归评估。必须在*未删失*子集上算：rul == cap 的帧只表示「至少还有 cap 步」，
     # 把它当真值会让 MAE/R² 被大量「预测 cap、真值也 cap」的平凡命中撑起来。虚高到什么
@@ -382,10 +589,13 @@ def train_bundle(df, window=15, horizon=12, anomaly_contamination="auto"):
     # 也就是说这个头其实没有绝对量级的预测力，只是把「远/近」分开了。删失率与评估样本数
     # 一并写进报告，读的人才知道这两个指标是在什么基础上算出来的。
     try:
-        rul_raw = np.maximum(model_rul.predict(X_te), 0.0)
+        rul_raw = np.maximum(model_rul.predict(X[te]), 0.0)
         # 评估的必须是投影后、真正会上屏的那个数。否则报告会写着 20 条矛盾而大屏一条
         # 都看不到，两边对不上，读报告的人会以为投影没生效。
-        rul_pred = consistent_rul(prob, rul_raw, horizon) if prob is not None else rul_raw
+        # 投影边界必须用**当前生效的判正线**，原来硬编码 0.5 而线上是 0.80，
+        # 于是 prob∈[0.5,0.8) 的点位被判 normal 却输出 rul<horizon。
+        rul_pred = (consistent_rul(prob_te, rul_raw, horizon, threshold=best_t)
+                    if prob_te is not None else rul_raw)
         y_rul_te = y_rul[te]
         obs = y_rul_te < rul_cap
         report["rul_censored_rate"] = round(float(1 - obs.mean()), 4) if len(obs) else 0.0
@@ -394,26 +604,41 @@ def train_bundle(df, window=15, horizon=12, anomaly_contamination="auto"):
             report["rul_mae"] = round(float(mean_absolute_error(y_rul_te[obs], rul_pred[obs])), 2)
             report["rul_r2"] = round(float(r2_score(y_rul_te[obs], rul_pred[obs])), 4)
         # 分类器与 RUL 头学的是同一 anomaly_series 的两个切面，且 label==1 ⟺ rul<horizon
-        # 恒成立，因此 prob≥0.5 的帧其 RUL 必须 < horizon。违反条数直接暴露「12 步内必然
+        # 恒成立，因此 prob≥阈值 的帧其 RUL 必须 < horizon。违反条数直接暴露「12 步内必然
         # 异常」与「还要 75 步才异常」同时出现在一张卡片上的自相矛盾输出。
-        if prob is not None and len(prob):
-            hi = prob >= 0.5
+        if prob_te is not None and len(prob_te) and best_t is not None:
+            hi = prob_te >= best_t
             report["n_high_risk"] = int(hi.sum())
             report["rul_contradictions"] = int(np.sum(rul_pred[hi] >= horizon))
-    except Exception:
-        pass
+            # 残余矛盾单独统计：prob 落在 [0.5, 阈值) 的点位被判 normal，但投影只按阈值切，
+            # 它们的 RUL 仍可能 < horizon（"状态正常 + 约 11 步内可能异常"）。原来
+            # rul_contradictions 的计数边界与投影边界同源（都是 0.5），结构上恒为 0，
+            # 那是自证不是校验——这一条才是真实的残余矛盾量。
+            band = (prob_te >= 0.5) & (prob_te < best_t)
+            report["rul_contradictions_band"] = int(np.sum(rul_pred[band] < horizon))
+    except Exception as e:
+        errors.append(f"rul_eval: {type(e).__name__}: {e}")
 
-    # 规则基线对比（3σ 阈值）
+    # ---- 规则基线对比（3σ 阈值）----
+    # 注意口径：这条基线用的是 15 帧滚动 z>3，而**在线**台账里的 rule_baseline 用的是
+    # SENSOR_METRIC_DEFS 的固定阈值表，两者不是同一个检测器。对外只能说"与滚动 3σ 基线
+    # 在前向窗口口径下对比"，不能说"和线上规则完全同口径"。
     try:
         base_pred = rule_baseline_predict(feat, window).values[te]
-        bp, br, bf = precision_recall_f1(yf_te, base_pred)
+        bp, br, bf = precision_recall_f1(y_te, base_pred)
         report["baseline_precision"] = round(float(bp), 4)
         report["baseline_recall"] = round(float(br), 4)
         report["baseline_f1"] = round(float(bf), 4)
-    except Exception:
-        pass
+    except Exception as e:
+        errors.append(f"baseline: {type(e).__name__}: {e}")
 
-    report["importance"] = feature_importance(model_b, X, feature_cols)
+    # 全局重要度只在**训练段**上算：原来传的是 train+test 拼起来的全量 X，让被评估样本
+    # 参与自己的解释，口径混乱。
+    report["importance"] = feature_importance(model_b, X_fit, feature_cols, y=y_future[fit])
+    # 静默吞异常是这套代码的老毛病：一旦某段抛出，report 里直接没有 rul_* / baseline_*
+    # 字段，读的人以为"这次没算"，线上则表现为"模型一直不预警"而日志一片干净。全部显式记录。
+    if errors:
+        report["errors"] = errors
     report["warnings"] = label_warnings(report)
     bundle.report = report
     return bundle, report
@@ -455,9 +680,40 @@ def label_warnings(report):
     contra = report.get("rul_contradictions")
     nhi = report.get("n_high_risk") or 0
     if contra and nhi:
-        w.append(f"RUL 自洽约束被破坏：{contra}/{nhi} 个 prob≥0.5 的测试帧仍预测出 RUL≥horizon({horizon})。"
+        w.append(f"RUL 自洽约束被破坏：{contra}/{nhi} 个 prob≥阈值 的测试帧仍预测出 RUL≥horizon({horizon})。"
                  f"consistent_rul 的投影本应让该计数恒为 0，出现非零说明投影被绕过、"
                  f"或 label 与 rul 的定义已不再互为充要条件——两者会被印在同一张卡片上，务必先查")
+    # 残余矛盾：prob 落在 [0.5, 阈值) 的帧被判 normal 却输出 rul<horizon。投影按阈值切，
+    # 这段无法消除，只能如实统计出来；它非零说明"正常 + 约 N 步内可能异常"仍会少量出现。
+    band = report.get("rul_contradictions_band")
+    if band:
+        w.append(f"残余矛盾 {band} 帧：prob∈[0.5, 阈值) 被判 normal 但 RUL<horizon，"
+                 f"大屏会显示「正常 + 约 {horizon} 步内可能异常」。这是判正线高于 0.5 的必然代价，"
+                 f"若要彻底消除得把判正线降回 0.5（代价是精确率大幅下降）")
+
+    # 标签截尾：测试集里被丢掉的未知帧占比。占比越高，说明本版指标与旧版（把尾部一律标 0）
+    # 的差距越大，两者不可直接对比。
+    lab_trunc = (report.get("label") or {}).get("label_truncated_frames", 0)
+    n_all = report.get("n_samples", 0)
+    if lab_trunc and n_all:
+        w.append(f"标签截尾：{lab_trunc}/{n_all} 帧（{lab_trunc / n_all:.0%}）因未来窗口被数据末尾"
+                 f"截断而标为未知，已从训练/阈值扫描/评估中剔除。旧版本把这些帧一律标 0，"
+                 f"压低了测试集基准率，因此本版指标与旧版不可直接对比")
+
+    # 阈值来源不是"训练段内的验证集扫描"时，本次的 precision/recall 不能当成绩报。
+    src = report.get("threshold_source")
+    if src and src != "validation_scan":
+        w.append(f"判正阈值来源 = {src}：未能在训练段内切出可信验证集，本次**不写阈值**，"
+                 f"推理端退回配置兜底线（{report.get('config', {}).get('risk_threshold')}）。"
+                 f"不要对外报本次的 precision/recall 作为模型成绩")
+
+    # A 头方向自检：anomaly_score = sigmoid(-score_samples)，因此正样本组 mean 必须更低。
+    ah = report.get("anomaly_head") or {}
+    mp, mn = ah.get("mean_positive"), ah.get("mean_negative")
+    if mp is not None and mn is not None and mp > mn:
+        w.append(f"A 头方向可能反了：正样本组 score_samples 均值 {mp} > 负样本组 {mn}。"
+                 f"anomaly_score 取的是 sigmoid(-raw)，正样本必须更低；若确为反向，"
+                 f"risk_score 里 0.3 的权重等于在给异常点加分，务必先查")
 
     r2 = report.get("rul_r2")
     if r2 is not None and r2 < 0:
@@ -487,30 +743,50 @@ def precision_recall_f1(y_true, y_pred):
             f1_score(y_true, y_pred, zero_division=0))
 
 
+# SHAP explainer 缓存。**必须同时持有 model 引用**：原来只用 id(model) 作键，
+# 模型对象被回收后内存地址会被复用，后来者拿到的是上一个模型的解释器 → 归因张冠李戴。
+# 存成 (model, explainer) 既让缓存持有强引用（对象不会被回收，id 自然不会被复用），
+# 也便于命中时校验是不是同一个模型。代价是缓存会留住模型，故只缓存少量对象。
 _SHAP_EXPLAINER_CACHE = {}
 
 
-def feature_importance(model, X, feature_cols, top_k=8, return_method=False):
+def _get_shap_explainer(model):
+    """按模型取（并缓存）TreeExplainer；同一 id 但不同对象时重建。"""
+    key = id(model)
+    hit = _SHAP_EXPLAINER_CACHE.get(key)
+    if hit is not None and hit[0] is model:
+        return hit[1]
+    explainer = shap.TreeExplainer(model)
+    _SHAP_EXPLAINER_CACHE[key] = (model, explainer)
+    return explainer
+
+
+def feature_importance(model, X, feature_cols, top_k=8, return_method=False, y=None):
     """可解释性：SHAP 优先 → feature_importances_ → 排列重要性。返回 [{feature, importance}]。
 
     return_method=True 时额外返回方法名。三条分支的语义并不等价，调用方必须知道走的是哪条：
-    SHAP 传入单行 X 时是局部归因，而 feature_importances_ 完全忽略 X、永远是训练集的全局
-    分裂增益，拿它解释单个点位是把全局结论冒充成局部结论。
+    SHAP 传单行 X 是局部归因，传多行 X 求 mean(|值|) 是**全局平均幅度**（这里如实区分标注），
+    而 feature_importances_ 完全忽略 X、永远是训练集的全局分裂增益——拿它解释单个点位是把
+    全局结论冒充成局部结论。
+
+    y：排列重要度的真实标签。**必传**才走排列分支——排列重要度是相对 y 的 scoring 变化，
+    原来传 np.zeros(len(X)) 当标签（常数），该分支输出的是没有统计意义的噪声，在既无 SHAP
+    又无 feature_importances_ 的模型上会静默给出错误的重要度排序。宁可不给重要度，也不给错的。
     """
     X = np.asarray(X, dtype=float)
+    n_rows = X.shape[0] if X.ndim > 1 else 1
     scores = None
     method = ""
     # 1) SHAP
     if HAVE_SHAP:
         try:
-            if id(model) not in _SHAP_EXPLAINER_CACHE:
-                _SHAP_EXPLAINER_CACHE[id(model)] = shap.TreeExplainer(model)
-            sv = _SHAP_EXPLAINER_CACHE[id(model)].shap_values(X)
+            sv = _get_shap_explainer(model).shap_values(X)
             arr = np.asarray(sv, dtype=float)
             if arr.ndim == 3:
                 arr = arr[..., 1]          # 二分类取正类
             scores = dict(zip(feature_cols, [float(np.mean(np.abs(arr[:, i]))) for i in range(arr.shape[1])]))
-            method = "SHAP（局部）"
+            # 语义必须如实：单行是"这个点位为什么高风险"，多行是"训练集里哪些特征普遍有用"
+            method = "SHAP（局部）" if n_rows <= 1 else "SHAP（全局平均|值|）"
         except Exception:
             scores = None
     # 2) feature_importances_
@@ -520,10 +796,10 @@ def feature_importance(model, X, feature_cols, top_k=8, return_method=False):
             method = "全局特征重要度（非局部）"
         except Exception:
             scores = None
-    # 3) permutation importance
-    if not scores and HAVE_PERM:
+    # 3) permutation importance（必须有真实标签，否则不做）
+    if not scores and HAVE_PERM and y is not None and len(y) == n_rows:
         try:
-            perm = permutation_importance(model, X, np.zeros(len(X)), n_repeats=5, random_state=42)
+            perm = permutation_importance(model, X, np.asarray(y), n_repeats=5, random_state=42)
             scores = dict(zip(feature_cols, [float(x) for x in perm.importances_mean]))
             method = "排列重要度（全局）"
         except Exception:
@@ -591,9 +867,7 @@ def shap_local_signed(model, x_row, feature_cols, top_k=5):
     if not HAVE_SHAP:
         return [], False
     try:
-        if id(model) not in _SHAP_EXPLAINER_CACHE:
-            _SHAP_EXPLAINER_CACHE[id(model)] = shap.TreeExplainer(model)
-        sv = np.asarray(_SHAP_EXPLAINER_CACHE[id(model)].shap_values(
+        sv = np.asarray(_get_shap_explainer(model).shap_values(
             np.asarray(x_row, dtype=float).reshape(1, -1)), dtype=float)
         if sv.ndim == 3:
             sv = sv[..., 1]
@@ -616,8 +890,11 @@ def shap_local_signed(model, x_row, feature_cols, top_k=5):
 def explain_local(model, x_row, baseline_row, feature_cols, top_k=5):
     """单点位可解释性：SHAP → 遮挡归因 → 全局重要度，并把实际用的方法名如实返回。
 
-    前两条路径的 importance 都是「该特征把未来窗口异常概率推高了多少」，量纲一致、可互换。
-    第三条是训练集的全局分裂增益/幅度，语义完全不同，只能降级使用并明确标注。
+    前两条路径的 importance 都是「该特征把未来窗口异常概率推高了多少」，**但数值不可互换**：
+    SHAP 工作在对数几率尺度且保留符号，遮挡归因在概率尺度上取差值，概率饱和时遮挡归因会
+    严重低估（实跑：同一行样本 SHAP +2.58，遮挡归因只有 +0.0061）。所以这里保留 SHAP 优先，
+    这不是可以随手调换的偏好；任何"两者量纲一致、可直接比较"的表述都是错的。
+    第三条是训练集的全局分裂增益/幅度，语义更远，只能降级使用并明确标注。
     方法名必须跟着结果一起传给前端，否则前端无从判断该用哪种措辞。
     """
     top, ok = shap_local_signed(model, x_row, feature_cols, top_k=top_k)
@@ -636,7 +913,8 @@ def online_predict(readings, bundle, risk_threshold=0.7):
     df = readings_to_frame(readings)
     feat = build_features(df, bundle.window)
     if feat.empty:
-        return default_prediction(bundle)
+        # 历史不足 window 帧：绝不能返回一个"看起来正常"的 0 分（见 default_prediction）
+        return default_prediction(bundle, n_history=len(df))
     # 必须对齐训练时的特征列。模型是跨管网类型 pooled 训练的，而单个传感器的
     # build_features 会丢掉它没有的指标列（供水管网没有 gas_concentration/level/vibration）。
     # 列数或列序不一致会让下面三个模型全部抛异常，风险分恒为 0 且看不出任何报错。
@@ -658,7 +936,15 @@ def online_predict(readings, bundle, risk_threshold=0.7):
     anomaly_score = 0.0
     try:
         raw = float(bundle.model_a.score_samples(X)[0])
-        anomaly_score = float(1.0 / (1.0 + np.exp(-raw)))  # sigmoid 归一
+        # sklearn 的 score_samples **越低越异常**（判离群的条件是 decision_function =
+        # score_samples - offset_ < 0，offset_ = -0.5）。原实现写 sigmoid(raw) 方向是反的：
+        # 越正常的点分越高，risk_score 里 0.3 的权重等于在给异常点加分。
+        # 再按训练集分布标准化一次——score_samples 的典型区间只有约 (-0.8, -0.3)，
+        # 直接 sigmoid 会被压成 0.31~0.43 的近似常数，权重形同虚设。
+        z = raw
+        if bundle.a_score_mean is not None:
+            z = (raw - float(bundle.a_score_mean)) / (float(bundle.a_score_std) or 1.0)
+        anomaly_score = float(1.0 / (1.0 + np.exp(z)))  # = sigmoid(-z)
     except Exception as e:
         errors.append(f"model_a: {type(e).__name__}: {e}")
 
@@ -676,20 +962,25 @@ def online_predict(readings, bundle, risk_threshold=0.7):
         rul = float(bundle.y_mean or 0)
         errors.append(f"model_rul: {type(e).__name__}: {e}")
     # 概率和 RUL 会印在同一张卡片上，必须一起自洽：投影掉「12 步内必然异常却还要
-    # 75 步才异常」这种组合（依据与实测数据见 consistent_rul）
-    rul = consistent_rul(prob, rul, bundle.horizon)
+    # 75 步才异常」这种组合（依据与实测数据见 consistent_rul）。
+    # 投影边界必须与线上判正线一致，否则 prob∈[阈值,1) 之外那一段会冒出"正常 + 约 11 步内"。
+    cfg = get_config(getattr(bundle, "config", None))
+    w = cfg["risk_score_weights"]
+    rul = consistent_rul(prob, rul, bundle.horizon, threshold=bundle.threshold)
 
-    # RUL 项的截断点必须等于训练目标的删失上限（见 RUL_CAP_FACTOR）：高于它的 RUL 一律
-    # 记 0 分贡献。实测旧配置下 93/100 个点位的 RUL 都落在截断点之上，0.2 的权重形同虚设。
-    risk_score = float(min(100.0, (0.5 * prob + 0.3 * anomaly_score + 0.2 * (1 - min(rul / max(bundle.horizon * RUL_CAP_FACTOR, 1), 1))) * 100))
-    # 判正线取训练时扫出的测试集 F1 最优点（随模型存进 meta），不再是写死的 0.7 / 0.35。
+    # 权重、RUL 截断倍数一律读配置（原来三个文件各写一份，见 DEFAULT_CONFIG）。
+    # RUL 项的截断点必须等于训练目标的删失上限：高于它的 RUL 一律记 0 分贡献。
+    cap = max(bundle.horizon * int(cfg["rul_cap_factor"]), 1)
+    risk_score = float(min(100.0, (w["prob"] * prob + w["anomaly"] * anomaly_score
+                                   + w["rul"] * (1 - min(rul / cap, 1))) * 100))
+    # 判正线取**训练段内验证集**扫出的 F1 最优点（随模型存进 meta），不再是写死的 0.7 / 0.35。
     # 这个选择直接决定成果面板上模型对规则基线的胜负——同一批 268 条已评估台账记录实测：
     #   阈值 0.35（旧 *0.5 的 warning 线）命中率 62.5% / 精确率 40.3% / 每轮预警 62 条
-    #   阈值 0.80（训练所得）           命中率 45.0% / 精确率 78.3% / 每轮预警 23 条
+    #   阈值 0.80（验证集所得）          命中率 45.0% / 精确率 78.3% / 每轮预警 23 条
     # 基线是 30.0% / 75.0% / 提前 0 步，所以只有 0.80 这一档三项全胜；代价是预警变稀。
-    # critical 线取阈值到 1.0 的中点（0.80 → 0.90），台账「warning 及以上即判正」的口径不变。
-    warn_t = float(bundle.threshold) if bundle.threshold else risk_threshold
-    crit_t = warn_t + (1.0 - warn_t) / 2.0
+    # meta 里没有阈值（老模型 / 扫描失败）时才退回配置兜底线，并把这个事实透传出去。
+    warn_t = float(bundle.threshold) if bundle.threshold else float(cfg["risk_threshold"])
+    crit_t = warn_t + (1.0 - warn_t) * float(cfg["crit_midpoint"])
     status = "critical" if prob >= crit_t else ("warning" if prob >= warn_t else "normal")
 
     top, imp_method = [], ""
@@ -717,18 +1008,41 @@ def online_predict(readings, bundle, risk_threshold=0.7):
         # 全局重要度是「训练集里哪些特征普遍有用」，两者不能混为一谈
         "top_features_method": imp_method,
         "n_features": int(X.shape[1]),
+        # 阈值来源 + 风险分档 + 权重一起透传：光看 predicted_status 分不清阈值是扫出来的
+        # 还是兜底的，Agent 与前端需要据此决定措辞（"模型打分" vs "异常概率"）
+        "threshold_source": getattr(bundle, "threshold_source", None),
+        "risk_levels": cfg["risk_levels"],
+        "risk_score_weights": w,
+        # prob 是 class_weight="balanced" 下的**原始**输出，没做概率校准，所以它的准确说法是
+        # "模型打分"而不是"异常概率"（重加权会系统性抬高正类概率）。isotonic 校准 +
+        # 可靠性曲线 + Brier 是后续工作，在那之前对外一律按"打分"表述。
+        "prob_calibrated": False,
+        "data_insufficient": False,
     }
     if errors:
         result["model_errors"] = errors
     return result
 
 
-def default_prediction(bundle):
-    # 降级路径也要满足同一条自洽约束：prob=0 表示「horizon 步内不会异常」，RUL 就不能
-    # 小于 horizon。y_mean 现在是未删失子集的均值（偏小），不投影的话这条分支反而成了
-    # 唯一会自相矛盾的出口。
+def default_prediction(bundle, n_history=None):
+    """历史不足（读入帧数 < window）时的降级结果。
+
+    **必须带 data_insufficient 标记**：原实现只返回 risk_score=0 / prob=0 / status=normal，
+    前端与台账无法区分"真的没有风险"和"数据不够没法判断"——这正是"让 bug 伪装成合理的 0"。
+    演示前 200 帧的热身期、或某传感器刚上线时都会命中。前端遇到该标记必须灰显"数据不足"，
+    台账统计命中/误报时也要把这类记录从分母里剔除。
+
+    降级路径同样要满足自洽约束：prob=0 表示「horizon 步内不会异常」，RUL 就不能小于 horizon。
+    """
     rul = consistent_rul(0.0, float(bundle.y_mean or 0), bundle.horizon)
+    cfg = get_config(getattr(bundle, "config", None))
     return {"risk_score": 0.0, "anomaly_score": 0.0, "future_anomaly_prob": 0.0,
             "rul": rul, "rul_unit": "steps", "horizon": int(bundle.horizon),
             "predicted_status": "normal", "top_features": [],
-            "top_features_method": "历史不足，无法归因"}
+            "top_features_method": "历史不足，无法归因",
+            "threshold": round(float(bundle.threshold or cfg["risk_threshold"]), 3),
+            "threshold_source": getattr(bundle, "threshold_source", None),
+            "prob_calibrated": False,
+            "data_insufficient": True,
+            "n_history": int(n_history) if n_history is not None else None,
+            "required_history": int(bundle.window)}

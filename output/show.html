@@ -4610,9 +4610,10 @@
         var colors = ['#2563eb', '#f97316', '#06b6d4', '#ef4444', '#8b5cf6'];
 
         var byRegionType = {};
-        ledgerFiltered().forEach(function(a) {
-            var k = a.region + '|' + a.type;
-            byRegionType[k] = (byRegionType[k] || 0) + 1;
+        // 改用与侧表一致的全量分布（mockDistribution.by_region，5000 段口径），保证图/表数字一致
+        (mockDistribution.by_region || []).forEach(function(d) {
+            var k = d.region + '|' + d.pipeline_type;
+            byRegionType[k] = (byRegionType[k] || 0) + d.count;
         });
         var rawTotals = {};
         regions.forEach(function(r) {
@@ -4951,7 +4952,8 @@
         Object.keys(AM_PREFIX_META).forEach(function(k) { gisLayerGroups[k] = L.layerGroup().addTo(gaodeMap); });
         var townCoords = {};
         mockMapData.forEach(function(d) { townCoords[d.region] = d.coords; });
-        getAssetLedger().forEach(function(a) {
+        // 地图打点数量上限：避免 5000 条 polyline 导致 Leaflet 卡顿（图表统计仍用完整 5000 台账）
+        getAssetLedger().slice(0, 1500).forEach(function(a) {
             var c = townCoords[a.region];
             if (!c) return;
             var prefix = a.id.slice(0, 3);
@@ -7402,7 +7404,7 @@
     function buildAssetLedger() {
         var counters = { WSP: 0, HTP: 0, SWP: 0, GSP: 0, HZP: 0 };
         var list = [];
-        var N = 312;
+        var N = 5000;   // 资产台账规模：与服务端"5000 段"口径保持一致（此前 312 导致各图数字偏小、与区域分布表不一致）
         for (var i = 0; i < N; i++) {
             var r = ledgerHash('led-' + i) % 100;
             var prefix = r < 31 ? 'WSP' : r < 53 ? 'HTP' : r < 73 ? 'SWP' : r < 91 ? 'GSP' : 'HZP';
@@ -10482,6 +10484,7 @@
     // ==================== 生命周期档案（第二阶段） ====================
     var lcFiles = {};
     var lcCurrent = '';
+    var lcLoaded = {};
 
     var LC_STAGES = [
         { key: 'purchase', name: '采购' },
@@ -10492,8 +10495,23 @@
     ];
 
     function lcFilesOf(id) {
-        if (!lcFiles[id]) lcFiles[id] = { purchase: [], construction: [], oam: [], renovate: [], scrap: [] };
+        if (!lcFiles[id]) lcFiles[id] = { purchase: [], construction: [], oam: [], renovate: [], scrap: [], general: [] };
         return lcFiles[id];
+    }
+
+    function lcLoadAttachments(id) {
+        // 从服务器加载该资产的附件，填充到各阶段桶（刷新/跨设备可看）
+        if (!id) return;
+        apiRequest('GET', '/lifecycle/attachments?asset_id=' + encodeURIComponent(id)).then(function(d) {
+            var bucket = lcFilesOf(id);
+            Object.keys(bucket).forEach(function(k) { bucket[k] = []; });
+            (d.attachments || []).forEach(function(a) {
+                var st = a.stage || 'general';
+                if (!bucket[st]) bucket[st] = [];
+                bucket[st].push({ name: a.name, url: '/lifecycle/attachment/' + a.file_id, file_id: a.file_id });
+            });
+            lcRender();
+        }).catch(function() {});
     }
 
     function lcBuild(id) {
@@ -10582,7 +10600,15 @@
         var files = lcFilesOf(lcCurrent)[stage];
         var html = '<div class="lc-files">';
         files.forEach(function(f, i) {
-            html += '<span class="lc-file">📎 ' + amEsc(f) + ' <b onclick="lcRemoveFile(\'' + stage + '\',' + i + ')" title="移除">✕</b></span>';
+            var name = (typeof f === 'string') ? f : f.name;
+            var url = (typeof f === 'string') ? '' : (f.url || '');
+            if (url) {
+                // 有文件本体 → 可点击下载/打开查看
+                html += '<a class="lc-file" href="' + url + '" download="' + amEsc(name) + '" title="点击下载 / 打开查看">📎 ' + amEsc(name) + '</a> ' +
+                    '<b onclick="lcRemoveFile(\'' + stage + '\',' + i + ')" title="移除">✕</b>';
+            } else {
+                html += '<span class="lc-file">📎 ' + amEsc(name) + ' <b onclick="lcRemoveFile(\'' + stage + '\',' + i + ')" title="移除">✕</b></span>';
+            }
         });
         html += '<label class="m-btn lc-upload">+ 上传附件<input type="file" onchange="lcAddFile(\'' + stage + '\', this)"></label></div>';
         return html;
@@ -10590,14 +10616,44 @@
 
     function lcAddFile(stage, input) {
         if (!input.files || !input.files.length) return;
-        lcFilesOf(lcCurrent)[stage].push(input.files[0].name);
-        showToast('附件已添加：' + input.files[0].name, 'success');
-        lcRender();
+        var f = input.files[0];
+        var fd = new FormData();
+        fd.append('asset_id', lcCurrent);
+        fd.append('stage', stage);
+        fd.append('file', f);
+        // 上传到服务器（真实存储，刷新/跨设备可看）
+        fetch(API_BASE + '/lifecycle/attachment/upload', {
+            method: 'POST',
+            headers: { 'Authorization': 'Bearer ' + (localStorage.getItem('pipeline_token') || '') },
+            body: fd
+        }).then(function(res) {
+            return res.json().then(function(data) {
+                if (!res.ok) throw new Error((data && data.detail) || ('上传失败 ' + res.status));
+                return data;
+            });
+        }).then(function(d) {
+            showToast('附件已上传：' + d.name, 'success');
+            lcLoadAttachments(lcCurrent);
+        }).catch(function(e) {
+            showToast('上传失败：' + (e && e.message ? e.message : '网络错误'), 'error');
+        });
     }
 
     function lcRemoveFile(stage, idx) {
-        lcFilesOf(lcCurrent)[stage].splice(idx, 1);
-        lcRender();
+        var bucket = lcFilesOf(lcCurrent)[stage];
+        var f = bucket[idx];
+        if (f && f.file_id) {
+            // 服务器文件：删除后再刷新
+            apiRequest('DELETE', '/lifecycle/attachment/' + f.file_id).then(function() {
+                lcLoadAttachments(lcCurrent);
+            }).catch(function() {
+                bucket.splice(idx, 1);
+                lcRender();
+            });
+        } else {
+            bucket.splice(idx, 1);
+            lcRender();
+        }
     }
 
     function lcKv(pairs) {
@@ -10613,6 +10669,11 @@
     }
 
     function lcRender() {
+        // 首次渲染该资产时，从服务器加载其附件（刷新/跨设备可看）；已加载则不重复请求
+        if (lcCurrent && !lcLoaded[lcCurrent]) {
+            lcLoaded[lcCurrent] = true;
+            lcLoadAttachments(lcCurrent);
+        }
         var d = lcBuild(lcCurrent);
         var states = lcStageStates(d);
 
@@ -10819,6 +10880,7 @@
     }
 
     function invFind(id) {
+        if (!id || !invPlans) return null;
         for (var i = 0; i < invPlans.length; i++) if (invPlans[i].id === id) return invPlans[i];
         return null;
     }
@@ -10904,12 +10966,13 @@
     }
 
     function invScan() {
-        var plan = invFind(invCurrentPlan);
+        var plan = invCurrentPlan ? invFind(invCurrentPlan) : null;
         var input = document.getElementById('invScanInput');
-        if (!plan || !input) return;
+        if (!input) return;
+        if (!plan) { showToast('请先选择一个盘点计划（或新建计划）', 'warning'); return; }
         if (plan.status === '已完成') { showToast('该计划已完成，不能再录入', 'warning'); return; }
         var id = input.value.trim().toUpperCase();
-        if (!id) return;
+        if (!id) { showToast('请扫描或输入资产编号', 'warning'); return; }
         var exists = plan.items.some(function(it) { return it.assetId === id; });
         if (exists) { showToast(id + ' 已在本计划中盘点过', 'warning'); return; }
         var inLedger = getAssetLedger().some(function(a) { return a.id === id; });
@@ -11123,6 +11186,13 @@
 
     function initInventory() {
         if (!invPlans) invSeedPlans();
+        // 进入模块默认选中一个未完成的计划，确保"扫码录入"扫码条立即可见（刷新/切模块后不再显示空白）
+        if (!invCurrentPlan && invPlans.length) {
+            for (var _i = 0; _i < invPlans.length; _i++) {
+                if (invPlans[_i].status !== '已完成') { invCurrentPlan = invPlans[_i].id; break; }
+            }
+            if (!invCurrentPlan) invCurrentPlan = invPlans[0].id;
+        }
         var wrap = document.getElementById('modInventory');
         wrap.innerHTML =
             '<div class="stat-cards" id="invStats"></div>' +
@@ -11445,7 +11515,7 @@
             '<div style="margin-bottom:8px;color:#6b7280">窗口：' + escH(d.window) + ' 帧 · 预测步数：' + escH(d.horizon) + '</div>' +
             '<div style="margin-bottom:8px">' + (byType || '<span style="color:#94a3b8">暂无</span>') + '</div>' +
             '<div class="mod-table-wrap"><table class="mod-table" id="bdPredTable">' +
-                '<tr><th>资产</th><th>类型</th><th>区域</th><th>风险分</th><th>异常概率</th><th>RUL</th><th>结论</th></tr>' +
+                '<tr><th>资产</th><th>类型</th><th>区域</th><th>风险分</th><th>模型打分</th><th>RUL</th><th>结论</th></tr>' +
                 (risky || '<tr><td colspan="7"><div class="empty-tip">暂无预测数据（需模型训练且传感器在运行）</div></td></tr>') +
             '</table></div>';
     }
@@ -11810,7 +11880,7 @@
         var rn = document.getElementById('pdRankNote');
         if (rn) rn.textContent = '点击行查看诊断' + (s.factor_method ? ' · 关键因子：' + s.factor_method : '');
         var head = '<tr><th>#</th><th>资产</th><th>类型</th><th>区域</th><th>风险分</th><th>等级</th>' +
-                   '<th>异常概率</th><th>RUL(步)</th><th>关键因子</th><th>操作</th></tr>';
+                   '<th>模型打分</th><th>RUL(步)</th><th>关键因子</th><th>操作</th></tr>';
         var rows = s.top_risky || [];
         if (!rows.length) {
             tb.innerHTML = head + '<tr><td colspan="10"><div class="empty-tip">' +
@@ -11885,7 +11955,17 @@
         });
         var h = '<div class="pd-diag-sec">① 预测结论</div>' +
             '<div class="pd-diag-line">' + escH(d.device_type || '') + ' <b>' + escH(d.asset_id || d.sensor_id) + '</b>（' + escH(d.region || '—') + '）<br>' +
-            '风险等级 ' + pdRiskBadge(p.risk_level) + '　风险分 <b>' + escH(p.risk_score) + '</b>　未来窗口异常概率 <b>' + pdPct(p.future_anomaly_prob) + '</b>　RUL ≈ <b>' + escH(p.rul) + '</b> 步</div>' +
+            // 历史不足时不能显示"风险分 0 / 正常"——那会让"数据不够没法判断"伪装成"确实没风险"。
+            // 后端在 default_prediction 里带 data_insufficient 标记，这里必须如实灰显。
+            (p.data_insufficient === true
+                ? '风险等级 ' + pdRiskBadge(p.risk_level) + '　<b>数据不足，无法判定</b>（历史 ' +
+                  escH(p.n_history === null || p.n_history === undefined ? '?' : p.n_history) + ' 帧 / 需 ' +
+                  escH(p.required_history || 15) + ' 帧）</div>'
+                : '风险等级 ' + pdRiskBadge(p.risk_level) + '　风险分 <b>' + escH(p.risk_score) + '</b>　未来窗口<b>模型打分</b> <b>' + pdPct(p.future_anomaly_prob) + '</b>　RUL ≈ <b>' + escH(p.rul) + '</b> 步</div>') +
+            (p.data_insufficient === true ? '' :
+                '<div class="pd-note" style="margin-top:4px">说明：该「模型打分」是 class_weight=balanced 下的原始输出，<b>未做概率校准</b>，'
+                + '语义是模型的风险打分而不是「异常概率」；判正线 ' + escH(p.threshold === null || p.threshold === undefined ? '—' : p.threshold)
+                + '（来源 ' + escH(p.threshold_source || '未知') + '）。</div>') +
             (d.model_ready ? '' : '<div class="pd-note" style="margin-top:4px">⚠ 模型未就绪，以上为降级结果。</div>');
 
         var fm = d.factor_method || '';
@@ -12051,7 +12131,7 @@
     function renderPdLedger(recs) {
         var tb = document.getElementById('pdLedgerTable');
         if (!tb) return;
-        var head = '<tr><th>时间</th><th>传感器</th><th>资产</th><th>类型</th><th>风险分</th><th>异常概率</th>' +
+        var head = '<tr><th>时间</th><th>传感器</th><th>资产</th><th>类型</th><th>风险分</th><th>模型打分</th>' +
                    '<th>预测结论</th><th>真实结果</th><th>提前</th><th>预警号</th><th>处置反馈</th></tr>';
         if (!recs || !recs.length) {
             tb.innerHTML = head + '<tr><td colspan="11"><div class="empty-tip">台账暂无记录：闭环扫描每 20 帧写入一次，需模型就绪且传感器模拟在运行</div></td></tr>';

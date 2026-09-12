@@ -194,12 +194,30 @@ _ACTION_BY_TYPE = {
 }
 
 
-def _risk_band(risk_score):
+def _risk_band(risk_score, levels=None):
+    """风险分 → (档位名, 处置动作清单, 风险分)。
+
+    分档线**优先取模型 meta 下发的 risk_levels**（main.py 把 bundle.config 透传进 pred dict）。
+    原来 80/60/40 在 predictive_models、main.py、agent_brain 三处各写一遍，改一处就对不上：
+    demo 时表现为"同一张预警卡片上，风险档与阈值描述互相矛盾、紧急工单永远升不上去"。
+    """
     try:
         rs = float(risk_score or 0)
     except (TypeError, ValueError):
         rs = 0.0
-    for threshold, label, actions in _ACTION_BY_BAND:
+    bands = _ACTION_BY_BAND
+    if isinstance(levels, dict) and levels:
+        try:
+            # 只替换阈值，保留原有的档位名与动作清单
+            bands = [
+                (float(levels.get("critical", _ACTION_BY_BAND[0][0])), _ACTION_BY_BAND[0][1], _ACTION_BY_BAND[0][2]),
+                (float(levels.get("warning", _ACTION_BY_BAND[1][0])), _ACTION_BY_BAND[1][1], _ACTION_BY_BAND[1][2]),
+                (float(levels.get("attention", _ACTION_BY_BAND[2][0])), _ACTION_BY_BAND[2][1], _ACTION_BY_BAND[2][2]),
+                _ACTION_BY_BAND[3],
+            ]
+        except Exception:
+            bands = _ACTION_BY_BAND
+    for threshold, label, actions in bands:
         if rs >= threshold:
             return label, actions, rs
     return "正常", _ACTION_BY_BAND[-1][2], rs
@@ -208,7 +226,7 @@ def _risk_band(risk_score):
 def _kb_query(pred: dict, device_type: str) -> str:
     """由预测结果反推检索式，让 RAG 命中对应的规范/预案条目。"""
     feats = " ".join(explain_feature(f.get("feature", "")) for f in (pred.get("top_features") or [])[:3])
-    band_label = _risk_band(pred.get("risk_score"))[0]
+    band_label = _risk_band(pred.get("risk_score"), pred.get("risk_levels"))[0]
     parts = [device_type or "", band_label, feats]
     st = pred.get("predicted_status")
     if st == "critical":
@@ -227,10 +245,11 @@ def _rul_span(rul, horizon=None) -> str:
     predictive_models.consistent_rul），只有「快出事 / 还早」的判别力，报绝对步数会被
     当成精确倒计时念。rul<1 时 :.0f 会印成「0 步」，大屏上看着像故障，单独走一档。
 
-    两侧的含义不对称，必须分开措辞。consistent_rul 在 prob<0.5 时把 rul 抬到 >= horizon，
-    那是个*下界*——模型只敢说「horizon 步内不会出事」，再往后具体几步它给不出。一律念成
-    「约 N 步内」会变成反方向的过度承诺（实测抓到过：SENSOR-001 判定「正常」、概率 10.3%，
-    却输出「RUL 约 14 步内」，等于告诉运维 14 步后必然出事）。
+    两侧的含义不对称，必须分开措辞。consistent_rul 在 prob 低于**判正线**（bundle.threshold，
+    实测 0.80；不再是硬编码的 0.5）时把 rul 抬到 >= horizon，那是个*下界*——模型只敢说
+    「horizon 步内不会出事」，再往后具体几步它给不出。一律念成「约 N 步内」会变成反方向的
+    过度承诺（实测抓到过：SENSOR-001 判定「正常」、概率 10.3%，却输出「RUL 约 14 步内」，
+    等于告诉运维 14 步后必然出事）。
     """
     r = float(rul)
     h = int(horizon or 12)
@@ -240,17 +259,22 @@ def _rul_span(rul, horizon=None) -> str:
 
 
 def _suggested_actions(pred: dict, device_type: str) -> list:
-    label, actions, rs = _risk_band(pred.get("risk_score"))
+    label, actions, rs = _risk_band(pred.get("risk_score"), pred.get("risk_levels"))
     out = list(actions)
     extra = _ACTION_BY_TYPE.get(device_type or "")
     if extra:
         out.append(extra)
-    if pred.get("rul") is not None:
+    # 必须**同时**满足「RUL 落进窗口」与「状态被判为预警及以上」才给紧急话术。
+    # 原来只看 rul < horizon：判正线（bundle.threshold，实测 0.80）高于 0.5 时，
+    # prob ∈ [0.5, 0.8) 的点位 predicted_status = "normal" 但仍输出 rul < horizon，
+    # 于是同一张卡片上写着"正常"、下面又催"已进入预警窗口、时限提前"——自相矛盾。
+    st = pred.get("predicted_status") or "normal"
+    if pred.get("rul") is not None and st in ("warning", "critical"):
         try:
             rul = float(pred["rul"])
             # 窗口取自模型而非写死 12：horizon 是重训时可调的（1-48）。
             horizon = int(pred.get("horizon") or 12)
-            # 用 < 不用 <=：consistent_rul 保证 prob<0.5 时 rul >= horizon，
+            # 用 < 不用 <=：consistent_rul 保证 prob < 判正线时 rul >= horizon，
             # 写成 <= 会把恰好等于 horizon 的正常点位也套上紧急话术。
             if rul < horizon:
                 out.insert(0, f"RUL {_rul_span(rul, horizon)}可能出现异常，已进入预警窗口，处置时限按上一档提前执行。")
@@ -260,16 +284,19 @@ def _suggested_actions(pred: dict, device_type: str) -> list:
 
 
 def _action_for_alert(pred: dict) -> str:
-    label = _risk_band(pred.get("risk_score"))[0]
+    label = _risk_band(pred.get("risk_score"), pred.get("risk_levels"))[0]
     return {"危急": "紧急", "高风险": "高", "预警": "中", "正常": "低"}.get(label, "中")
 
 
 # ==============================================================================
 # 诊断编排
 # ==============================================================================
-def risk_band(risk_score):
-    """风险分 → (档位标签, 处置动作清单, 数值)。main.py 与本模块共用同一套分档口径。"""
-    return _risk_band(risk_score)
+def risk_band(risk_score, levels=None):
+    """风险分 → (档位标签, 处置动作清单, 数值)。main.py 与本模块共用同一套分档口径。
+
+    levels 传模型 meta 下发的 risk_levels 时以它为准（见 _risk_band）。
+    """
+    return _risk_band(risk_score, levels)
 
 
 def action_priority(pred: dict) -> str:
@@ -295,7 +322,7 @@ def diagnose(target: str, predict_fn, top_k_kb: int = 3, remember: bool = True) 
 
     device_type = pred.get("device_type") or ""
     top_features = pred.get("top_features") or []
-    label, _, rs = _risk_band(pred.get("risk_score"))
+    label, _, rs = _risk_band(pred.get("risk_score"), pred.get("risk_levels"))
     actions = _suggested_actions(pred, device_type)
 
     evidence = []
